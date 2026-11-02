@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/playout-core", "src-tauri"]
+members = ["crates/playout-core", "crates/playout-audio", "src-tauri"]
 resolver = "2"
 
 [profile.release]

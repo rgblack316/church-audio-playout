@@ -44,6 +44,24 @@
   .small { color: var(--muted); font-size: 13px; }
   .err { color: var(--bad); min-height: 1.4em; }
   ul.files { max-height: 220px; overflow: auto; padding-left: 18px; margin: 6px 0; font-size: 14px; }
+  #audioBanner { display: none; background: #4a1f26; color: #ffd0d0; padding: 8px 16px;
+                 border-bottom: 1px solid var(--line); align-items: center; gap: 12px; }
+  #pads { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+  .pad { background: var(--panel); border: 2px solid var(--line); border-radius: 10px;
+         padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; cursor: pointer; }
+  .pad.selected { border-color: var(--accent); }
+  .pad.playing { background: #1d3326; border-color: #4fbf7a; }
+  .pad .num { color: var(--muted); font-size: 12px; }
+  .pad .label { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 1.4em; }
+  .pad .sub { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 1.2em; }
+  .pad .time { font-size: 34px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .pad.low .time { color: var(--bad); }
+  .pad .bar { height: 6px; background: #232b42; border-radius: 3px; overflow: hidden; }
+  .pad .bar > i { display: block; height: 100%; width: 0; background: var(--accent); }
+  .pad .btns { display: flex; gap: 8px; }
+  .pad .btns .go { flex: 1; font-size: 16px; padding: 10px; }
+  .pad .btns button:disabled { opacity: .4; cursor: default; }
+  .stopall { border-color: var(--bad); }
 </style>
 </head>
 <body>
@@ -52,10 +70,13 @@
   <div id="folder">No music folder selected</div>
   <button id="choose">Choose music folder…</button>
   <button id="rescan">Rescan</button>
+  <button id="stopAll" class="stopall">Stop all</button>
   <button id="settings">Settings</button>
 </header>
+<div id="audioBanner"><span id="audioMsg"></span><button id="retryAudio">Retry audio</button></div>
 
 <main>
+  <section id="pads"></section>
   <div class="bar">
     <select id="songbook"><option value="">All songbooks</option></select>
     <input id="q" type="search" placeholder="Page number or title… e.g. 123, or amazing grace" autofocus>
@@ -65,8 +86,10 @@
 
 <footer>
   <span id="status">Ready</span>
+  <span class="small">Click a pad to select it · double-click a song to load it</span>
   <span class="spacer"></span>
   <span id="warn"></span>
+  <span id="device"></span>
 </footer>
 
 <dialog id="dlg">
@@ -145,6 +168,7 @@ function renderResults(tracks, haveFolder) {
     const tr = body.insertRow();
     tr.className = 'row';
     tr.title = t.path;
+    tr.dataset.id = t.id;
     const cells = [
       [t.page ?? '—', 'page'], [t.title, ''], [t.songbook, ''], [t.ext, 'fmt'],
     ];
@@ -217,6 +241,110 @@ $('applyPattern').addEventListener('click', async () => {
     $('patternErr').textContent = String(e);
   }
 });
+
+// ---------------- pads ----------------
+let selectedPad = 0;
+let padEls = [];
+let lastPads = [];
+
+function fmt(sec) {
+  const whole = Math.max(0, Math.ceil(sec - 1e-6));
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`;
+}
+
+function showError(e) { setStatus(String(e)); }
+
+function buildPads(n) {
+  const box = $('pads');
+  box.replaceChildren();
+  padEls = [];
+  for (let i = 0; i < n; i++) {
+    const el = document.createElement('div');
+    el.className = 'pad';
+    el.innerHTML = '<div class="num"></div><div class="label"></div><div class="sub"></div>' +
+      '<div class="time">0:00</div><div class="bar"><i></i></div>' +
+      '<div class="btns"><button class="go"></button><button class="clr" title="Empty this pad">\u2715</button></div>';
+    el.querySelector('.num').textContent = `Pad ${i + 1}`;
+    el.addEventListener('click', () => { selectedPad = i; paintSelection(); });
+    el.querySelector('.go').addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const p = lastPads[i];
+      if (!p) return;
+      invoke(p.playing ? 'stop_pad' : 'play_pad', { pad: i }).catch(showError);
+    });
+    el.querySelector('.clr').addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      invoke('clear_pad', { pad: i }).catch(showError);
+    });
+    box.append(el);
+    padEls.push(el);
+  }
+  paintSelection();
+}
+
+function paintSelection() {
+  padEls.forEach((el, i) => el.classList.toggle('selected', i === selectedPad));
+}
+
+function renderPads(s) {
+  lastPads = s.pads;
+  if (padEls.length !== s.pads.length) buildPads(s.pads.length);
+
+  $('audioBanner').style.display = s.audio.ok ? 'none' : 'flex';
+  if (!s.audio.ok) $('audioMsg').textContent = s.audio.error || 'Audio output is not available';
+  $('device').textContent = s.audio.ok ? `Output: ${s.audio.device} (${s.audio.sample_rate} Hz)` : '';
+
+  s.pads.forEach((p, i) => {
+    const el = padEls[i];
+    const remaining = Math.max(0, p.duration_secs - p.position_secs);
+    el.classList.toggle('playing', p.playing);
+    el.classList.toggle('low', p.playing && remaining <= 10);
+    el.querySelector('.label').textContent = p.loaded ? p.label : 'Empty';
+    el.querySelector('.sub').textContent = p.sub;
+    el.querySelector('.time').textContent = !p.loaded ? '\u2013:\u2013\u2013'
+      : p.playing ? '\u2212' + fmt(remaining) : fmt(p.duration_secs);
+    el.querySelector('.bar > i').style.width =
+      p.loaded && p.duration_secs > 0 ? `${(100 * p.position_secs / p.duration_secs).toFixed(1)}%` : '0';
+    const go = el.querySelector('.go');
+    go.textContent = p.playing ? '\u25a0 Stop' : '\u25b6 Play';
+    go.disabled = !p.loaded;
+    el.querySelector('.clr').disabled = p.playing || !p.loaded;
+  });
+}
+
+let polling = false;
+async function pollPads() {
+  if (polling) return;
+  polling = true;
+  try { renderPads(await invoke('get_pads')); } catch (e) { /* app closing */ }
+  polling = false;
+}
+setInterval(pollPads, 100);
+
+async function loadIntoSelected(trackId) {
+  const pad = selectedPad;
+  setStatus('Loading…');
+  try {
+    await invoke('load_pad', { pad, trackId });
+    setStatus(`Loaded onto pad ${pad + 1}`);
+    const n = lastPads.length;
+    for (let k = 1; k < n; k++) {            // move the selection to the next empty pad
+      const idx = (pad + k) % n;
+      if (!lastPads[idx] || !lastPads[idx].loaded) { selectedPad = idx; break; }
+    }
+    paintSelection();
+    pollPads();
+  } catch (e) {
+    showError(e);
+  }
+}
+
+$('results').addEventListener('dblclick', (ev) => {
+  const tr = ev.target.closest('tr.row');
+  if (tr) loadIntoSelected(Number(tr.dataset.id));
+});
+$('stopAll').addEventListener('click', () => invoke('stop_all').catch(showError));
+$('retryAudio').addEventListener('click', () => invoke('restart_audio').catch(showError));
 
 (async function init() {
   const s = await invoke('get_state');

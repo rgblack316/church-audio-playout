@@ -1,0 +1,116 @@
+use super::*;
+use crate::mixer::Mixer;
+use std::{io::Write, sync::Arc};
+
+fn wav_bytes(rate: u32, channels: u16, frames: u32, f: impl Fn(u32) -> i16) -> Vec<u8> {
+    let data_len = frames * channels as u32 * 2;
+    let mut v = Vec::new();
+    v.extend_from_slice(b"RIFF");
+    v.extend_from_slice(&(36 + data_len).to_le_bytes());
+    v.extend_from_slice(b"WAVEfmt ");
+    v.extend_from_slice(&16u32.to_le_bytes());
+    v.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    v.extend_from_slice(&channels.to_le_bytes());
+    v.extend_from_slice(&rate.to_le_bytes());
+    v.extend_from_slice(&(rate * channels as u32 * 2).to_le_bytes());
+    v.extend_from_slice(&(channels * 2).to_le_bytes());
+    v.extend_from_slice(&16u16.to_le_bytes());
+    v.extend_from_slice(b"data");
+    v.extend_from_slice(&data_len.to_le_bytes());
+    for i in 0..frames {
+        for _ in 0..channels {
+            v.extend_from_slice(&f(i).to_le_bytes());
+        }
+    }
+    v
+}
+
+fn decoded(rate: u32, channels: u16, samples: Vec<i16>) -> Arc<Decoded> {
+    Arc::new(Decoded { channels, sample_rate: rate, samples })
+}
+
+#[test]
+fn decodes_stereo_wav() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tone.wav");
+    std::fs::File::create(&path)
+        .unwrap()
+        .write_all(&wav_bytes(8000, 2, 8000, |i| (i % 100) as i16 * 100))
+        .unwrap();
+    let d = decode_file(&path).unwrap();
+    assert_eq!((d.channels, d.sample_rate, d.frames()), (2, 8000, 8000));
+    assert!((d.duration_secs() - 1.0).abs() < 1e-9);
+}
+
+#[test]
+fn decodes_mono_wav_and_rejects_garbage() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mono.wav");
+    std::fs::write(&path, wav_bytes(22050, 1, 2205, |_| 1000)).unwrap();
+    let d = decode_file(&path).unwrap();
+    assert_eq!((d.channels, d.frames()), (1, 2205));
+
+    let bad = dir.path().join("bad.mp3");
+    std::fs::write(&bad, b"this is not audio at all").unwrap();
+    assert!(decode_file(&bad).is_err());
+    assert!(decode_file(&dir.path().join("missing.mp3")).is_err());
+}
+
+#[test]
+fn mixer_plays_to_end_then_rewinds() {
+    let mut m = Mixer::new(2);
+    // 4 mono frames at the output rate: full-scale positive.
+    m.pads[0].decoded = Some(decoded(100, 1, vec![16384; 4]));
+    m.pads[0].playing = true;
+    let mut buf = vec![0.0f32; 8 * 2]; // 8 stereo frames
+    m.render(2, 100.0, &mut buf);
+    // first 4 frames carry audio (0.5), the rest are silence
+    for f in 0..4 {
+        assert!((buf[f * 2] - 0.5).abs() < 1e-4 && (buf[f * 2 + 1] - 0.5).abs() < 1e-4, "frame {f}");
+    }
+    for f in 4..8 {
+        assert_eq!((buf[f * 2], buf[f * 2 + 1]), (0.0, 0.0), "frame {f}");
+    }
+    assert!(!m.pads[0].playing);
+    assert_eq!(m.pads[0].pos, 0.0);
+}
+
+#[test]
+fn mixer_sums_pads_clamps_and_resamples() {
+    let mut m = Mixer::new(2);
+    m.pads[0].decoded = Some(decoded(100, 1, vec![30000; 10]));
+    m.pads[1].decoded = Some(decoded(100, 1, vec![30000; 10]));
+    m.pads[0].playing = true;
+    m.pads[1].playing = true;
+    let mut buf = vec![0.0f32; 4 * 2];
+    m.render(2, 100.0, &mut buf);
+    assert!(buf.iter().all(|v| *v == 1.0), "two loud pads must clamp, got {buf:?}");
+
+    // 50 Hz source into a 100 Hz output: position advances at half speed.
+    let mut m = Mixer::new(1);
+    m.pads[0].decoded = Some(decoded(50, 1, vec![0, 20000, 0, 0, 0, 0, 0, 0]));
+    m.pads[0].playing = true;
+    let mut buf = vec![0.0f32; 4];
+    m.render(1, 100.0, &mut buf);
+    assert!((m.pads[0].pos - 2.0).abs() < 1e-9);
+    // frame 1 is halfway between samples 0 and 1 (linear interpolation)
+    assert!((buf[1] - (10000.0 / 32768.0)).abs() < 1e-4, "{buf:?}");
+}
+
+#[test]
+fn engine_pad_bookkeeping_without_audio_device() {
+    let e = Engine::new(3);
+    let d = decoded(1000, 2, vec![0; 2000 * 3]); // 3 seconds stereo
+    assert!(e.check_loadable(0).is_ok());
+    assert!(e.check_loadable(9).is_err());
+    e.load(1, d, "Amazing Grace".into(), "Hymnal · p. 123".into()).unwrap();
+    let s = e.snapshot();
+    assert_eq!(s.pads.len(), 3);
+    assert!(!s.pads[0].loaded && s.pads[1].loaded);
+    assert_eq!(s.pads[1].label, "Amazing Grace");
+    assert!((s.pads[1].duration_secs - 3.0).abs() < 1e-9);
+    assert_eq!(s.pads[1].position_secs, 0.0);
+    assert!(e.play(0).is_err()); // empty pad or no device: either way an error
+    e.clear(1).unwrap();
+    assert!(!e.snapshot().pads[1].loaded);
+}

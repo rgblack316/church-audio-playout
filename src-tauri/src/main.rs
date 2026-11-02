@@ -2,10 +2,12 @@
 
 use playout_core::{scan, Library, Problem, Query, ScanOptions, Track, DEFAULT_PAGE_PATTERN};
 use serde::{Deserialize, Serialize};
-use std::{fs, path::Path, path::PathBuf, sync::Mutex};
+use playout_audio::{decode_file, Engine, Snapshot};
+use std::{fs, path::Path, path::PathBuf, sync::Arc, sync::Mutex};
 use tauri::{AppHandle, Manager, State};
 
 const DEFAULT_SEARCH_LIMIT: usize = 500;
+const DEFAULT_PADS: usize = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Settings {
@@ -169,17 +171,79 @@ fn search(shared: State<'_, Shared>, mut query: Query) -> Vec<Track> {
     state.library.search(&query).into_iter().cloned().collect()
 }
 
+// ---------- playback ----------
+
+#[tauri::command]
+fn get_pads(engine: State<'_, Engine>) -> Snapshot {
+    engine.snapshot()
+}
+
+/// Decode a library track fully into memory and put it on a pad.
+#[tauri::command(async)]
+fn load_pad(
+    shared: State<'_, Shared>,
+    engine: State<'_, Engine>,
+    pad: usize,
+    track_id: u32,
+) -> Result<(), String> {
+    let track = {
+        let state = shared.lock().unwrap();
+        state.library.get(track_id).cloned().ok_or("Track not found; try searching again")?
+    };
+    engine.check_loadable(pad)?;
+    let decoded = decode_file(Path::new(&track.path))
+        .map_err(|e| format!("Cannot play \"{}\": {e}", track.file_name))?;
+    let sub = match track.page {
+        Some(p) => format!("{} \u{b7} p. {}", track.songbook, p),
+        None => track.songbook.clone(),
+    };
+    engine.load(pad, Arc::new(decoded), track.title.clone(), sub)
+}
+
+#[tauri::command]
+fn play_pad(engine: State<'_, Engine>, pad: usize) -> Result<(), String> {
+    engine.play(pad)
+}
+
+#[tauri::command]
+fn stop_pad(engine: State<'_, Engine>, pad: usize) {
+    engine.stop(pad)
+}
+
+#[tauri::command]
+fn stop_all(engine: State<'_, Engine>) {
+    engine.stop_all()
+}
+
+#[tauri::command]
+fn clear_pad(engine: State<'_, Engine>, pad: usize) -> Result<(), String> {
+    engine.clear(pad)
+}
+
+#[tauri::command]
+fn restart_audio(engine: State<'_, Engine>) {
+    engine.restart_audio()
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Shared::new(AppState::default()))
+        .manage(Engine::new(DEFAULT_PADS))
         .invoke_handler(tauri::generate_handler![
             get_state,
             rescan,
             set_music_dir,
             set_page_pattern,
             get_page_pattern,
-            search
+            search,
+            get_pads,
+            load_pad,
+            play_pad,
+            stop_pad,
+            stop_all,
+            clear_pad,
+            restart_audio
         ])
         .run(tauri::generate_context!())
         .expect("error while running Church Playout");

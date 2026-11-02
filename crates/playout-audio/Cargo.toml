@@ -1,0 +1,22 @@
+[package]
+name = "playout-audio"
+version = "0.1.0"
+edition = "2021"
+description = "Audio decoding and multi-pad mixing for the church playout app"
+
+[features]
+# Windows Media Foundation fallback decoder (WMA and anything symphonia cannot read).
+mf = ["dep:windows"]
+
+[dependencies]
+cpal = "0.15"
+serde = { version = "1", features = ["derive"] }
+symphonia = { version = "0.5", features = ["all"] }
+windows = { version = "0.58", optional = true, features = [
+  "Win32_Foundation",
+  "Win32_Media_MediaFoundation",
+  "Win32_System_Com",
+] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -6,7 +6,17 @@ Windows church-service music playout app (Tauri 2 + Rust).
 - Phase 1 (done): scan a music folder, treat each top-level folder as a songbook,
   read the trailing number of each file name as the page number, search by page
   and/or title within one songbook or all of them.
-- Next: single player pad with playback and countdown, pad grid, favorites bar.
+- Phase 2 (done): audio playback. Each pad decodes its file into memory (instant start,
+  exact length) and all pads mix into the default Windows output device. A countdown shows
+  time remaining and turns red in the last 10 seconds. MP3, WAV, FLAC, OGG and M4A/AAC are
+  decoded directly; WMA (and anything else symphonia cannot read) falls back to Windows
+  Media Foundation. Files longer than 45 minutes are refused.
+- Next: configurable pad grid and overlap setting, favorites bar, keyboard shortcuts.
+
+## Using it
+Click a pad to select it, double-click a song in the results to load it there (the selection
+then moves to the next empty pad). Play/Stop on each pad; Stop all in the header. If the audio
+device is missing or changes, use **Retry audio** in the red banner.
 
 ## Music folder layout
 ```

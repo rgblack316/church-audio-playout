@@ -16,15 +16,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Run core tests
-        run: cargo test -p playout-core
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2" --locked
+      - name: Run tests
+        run: cargo test -p playout-core -p playout-audio
+
+      - name: Install Tauri CLI (prebuilt)
+        run: npm install -g @tauri-apps/cli@^2
 
       - name: Build installer
         working-directory: src-tauri
-        run: cargo tauri build
+        run: tauri build
 
       - uses: actions/upload-artifact@v4
         with:
