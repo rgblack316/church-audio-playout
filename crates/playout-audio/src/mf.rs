@@ -1,8 +1,8 @@
 //! Windows Media Foundation fallback decoder (handles WMA and other Windows codecs).
 //!
-//! Follows Microsoft's "Source Reader" recipe: open the file, ask for uncompressed PCM
-//! (major type + subtype only, so the decoder picks its natural format), read back what it
-//! actually produces, then pull samples until end of stream.
+//! Follows Microsoft's "Source Reader" recipe: open the file, ask for 16-bit PCM, read back
+//! what the decoder actually produces (converting if it differs), then pull samples until
+//! end of stream.
 
 use crate::decode::{pcm_bytes_to_i16, push_stereo, Decoded};
 use std::path::Path;
@@ -61,6 +61,11 @@ unsafe fn read_stream(path: &Path) -> Result<(Vec<i16>, u32, u32), String> {
     let wanted = MFCreateMediaType().map_err(step("MFCreateMediaType"))?;
     wanted.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio).map_err(step("SetGUID(major type)"))?;
     wanted.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM).map_err(step("SetGUID(subtype)"))?;
+    // Same request the first working build made: 16-bit PCM. Whatever the decoder really
+    // produces is read back below and converted, so this is a preference, not a requirement.
+    wanted
+        .SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)
+        .map_err(step("SetUINT32(bits per sample)"))?;
     reader
         .SetCurrentMediaType(stream, None, &wanted)
         .map_err(step("Selecting the PCM decoder"))?;
