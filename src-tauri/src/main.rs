@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use playout_core::{
-    scan_with_cache, Library, MetaCache, Problem, Query, ScanOptions, Track, DEFAULT_PAGE_PATTERN,
+    read_pending, scan_quick, Library, MetaCache, Pending, Problem, Query, ScanOptions, Track, DEFAULT_PAGE_PATTERN,
 };
 use serde::{Deserialize, Serialize};
 use playout_audio::{decode_file, Bank, Engine, Snapshot};
@@ -89,6 +89,10 @@ struct AppState {
     library: Library,
     meta_cache: MetaCache,
     cache_path: Option<PathBuf>,
+    /// Bumped by every successful scan; background tag reading stops when it changes.
+    scan_gen: u64,
+    /// (files done, files to read) for the current background tag pass.
+    tag_progress: (usize, usize),
 }
 
 type Shared = Mutex<AppState>;
@@ -154,7 +158,7 @@ fn do_scan(app: &AppHandle) -> Result<(), String> {
     let scan_lock = app.state::<ScanLock>();
     let _one_at_a_time = scan_lock.0.lock().unwrap_or_else(|e| e.into_inner());
     let shared = app.state::<Shared>();
-    let (dir, opts, mut cache, cache_path) = {
+    let (dir, opts, cache) = {
         let mut state = shared.lock().unwrap();
         ensure_init(app, &mut state);
         (
@@ -164,23 +168,64 @@ fn do_scan(app: &AppHandle) -> Result<(), String> {
                 read_tags: state.settings.read_tags,
                 ..ScanOptions::default()
             },
-            std::mem::take(&mut state.meta_cache),
-            state.cache_path.clone(),
+            state.meta_cache.clone(),
         )
     };
-    let result = match &dir {
-        Some(d) => scan_with_cache(Path::new(d), &opts, &mut cache),
-        None => Ok(Library::default()),
+    // Phase 1: list the files (fast, never opens an audio file) and publish them at once.
+    let (library, pending) = match &dir {
+        Some(d) => scan_quick(Path::new(d), &opts, &cache)?,
+        None => (Library::default(), Vec::new()),
     };
-    if opts.read_tags && result.is_ok() {
-        if let Some(p) = &cache_path {
-            let _ = cache.save(p);
+    let generation = {
+        let mut state = shared.lock().unwrap();
+        state.scan_gen += 1;
+        state.tag_progress = (0, pending.len());
+        state.meta_cache.prune(&library);
+        state.library = library;
+        state.scan_gen
+    };
+    // Phase 2: read tags in the background; the browser fills in as chunks complete.
+    if !pending.is_empty() {
+        let app = app.clone();
+        std::thread::spawn(move || read_tags_in_background(app, generation, pending));
+    }
+    Ok(())
+}
+
+fn read_tags_in_background(app: AppHandle, generation: u64, pending: Vec<Pending>) {
+    let shared = app.state::<Shared>();
+    for chunk in pending.chunks(48) {
+        if shared.lock().unwrap().scan_gen != generation {
+            return; // a newer scan replaced this library
+        }
+        let metas = read_pending(chunk);
+        let mut state = shared.lock().unwrap();
+        if state.scan_gen != generation {
+            return;
+        }
+        let state = &mut *state;
+        state.library.apply_meta(&mut state.meta_cache, chunk, metas);
+        state.tag_progress.0 += chunk.len();
+    }
+    let state = shared.lock().unwrap();
+    if state.scan_gen == generation {
+        if let Some(p) = &state.cache_path {
+            let _ = state.meta_cache.save(p);
         }
     }
-    let mut state = shared.lock().unwrap();
-    state.meta_cache = cache;
-    state.library = result?;
-    Ok(())
+}
+
+#[derive(Serialize)]
+struct TagProgress {
+    done: usize,
+    total: usize,
+}
+
+/// How far the background tag reading has got (total 0 = nothing to read).
+#[tauri::command]
+fn get_scan_progress(shared: State<'_, Shared>) -> TagProgress {
+    let (done, total) = shared.lock().unwrap().tag_progress;
+    TagProgress { done, total }
 }
 
 fn summary_now(shared: &Shared) -> Summary {
@@ -490,6 +535,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_state,
+            get_scan_progress,
             rescan,
             set_music_dir,
             set_page_pattern,

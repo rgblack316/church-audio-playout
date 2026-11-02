@@ -119,7 +119,7 @@ struct CacheEntry {
 
 /// Remembers tag data per file (keyed by path, modified time and size) so rescans only read
 /// files that are new or changed.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct MetaCache {
     entries: HashMap<String, CacheEntry>,
 }
@@ -148,24 +148,28 @@ impl MetaCache {
     }
 }
 
-struct Found {
-    path: PathBuf,
-    songbook: String,
-    stem: String,
-    file_name: String,
-    ext: String,
-    mtime: u64,
-    size: u64,
-}
-
 /// Scan `root` recursively without a tag cache (tags are still read if enabled).
 pub fn scan(root: &Path, opts: &ScanOptions) -> Result<Library, String> {
     scan_with_cache(root, opts, &mut MetaCache::default())
 }
 
-/// Scan `root` recursively. Returns an error only if the pattern is invalid
-/// or the root is not a directory.
-pub fn scan_with_cache(root: &Path, opts: &ScanOptions, cache: &mut MetaCache) -> Result<Library, String> {
+/// A file whose tags still have to be read (not in the cache, or changed since).
+#[derive(Debug, Clone)]
+pub struct Pending {
+    /// Index into `Library::tracks` (equals the track id).
+    pub index: usize,
+    pub path: PathBuf,
+    mtime: u64,
+    size: u64,
+}
+
+/// Fast first pass: walk the folder and build the library from file names and whatever the
+/// cache already knows. Never opens an audio file. Returns the files still needing tags.
+pub fn scan_quick(
+    root: &Path,
+    opts: &ScanOptions,
+    cache: &MetaCache,
+) -> Result<(Library, Vec<Pending>), String> {
     let re = Regex::new(&opts.page_pattern).map_err(|e| format!("Bad page pattern: {e}"))?;
     if !root.is_dir() {
         return Err(format!("Not a folder: {}", root.display()));
@@ -173,7 +177,7 @@ pub fn scan_with_cache(root: &Path, opts: &ScanOptions, cache: &mut MetaCache) -
     let exts: Vec<String> = opts.extensions.iter().map(|e| e.to_lowercase()).collect();
 
     let mut lib = Library::default();
-    let mut found: Vec<Found> = Vec::new();
+    let mut pending = Vec::new();
     for entry in WalkDir::new(root).follow_links(true).sort_by_file_name() {
         let entry = match entry {
             Ok(e) => e,
@@ -221,72 +225,85 @@ pub fn scan_with_cache(root: &Path, opts: &ScanOptions, cache: &mut MetaCache) -
                 (t, m.len())
             })
             .unwrap_or((0, 0));
-        found.push(Found {
-            path: path.to_path_buf(),
-            songbook,
-            stem: path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
-            file_name: path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
-            ext,
-            mtime,
-            size,
-        });
-    }
-
-    let metas = if opts.read_tags { collect_meta(&found, cache) } else { vec![Meta::default(); found.len()] };
-
-    for (f, meta) in found.into_iter().zip(metas) {
-        let (title, page) = parse_stem(&f.stem, &re);
+        let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let (title, page) = parse_stem(&stem, &re);
+        let path_str = path.display().to_string();
+        let mut meta = Meta::default();
+        if opts.read_tags {
+            match cache.entries.get(&path_str) {
+                Some(e) if e.mtime == mtime && e.size == size => meta = e.meta.clone(),
+                _ => pending.push(Pending { index: lib.tracks.len(), path: path.to_path_buf(), mtime, size }),
+            }
+        }
         lib.tracks.push(Track {
             id: lib.tracks.len() as u32,
-            path: f.path.display().to_string(),
-            songbook: f.songbook,
+            path: path_str,
+            songbook,
             title,
             page,
-            file_name: f.file_name,
-            ext: f.ext,
+            file_name: path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+            ext,
             tag_title: meta.tag_title,
             artist: meta.artist,
             album: meta.album,
             duration_secs: meta.duration_secs,
         });
     }
-    Ok(lib)
+    Ok((lib, pending))
 }
 
-/// Tag data for every found file, reading only what the cache does not already have,
-/// several files at a time. The cache is pruned to the files seen in this scan.
-fn collect_meta(found: &[Found], cache: &mut MetaCache) -> Vec<Meta> {
-    let key = |f: &Found| f.path.display().to_string();
-    let todo: Vec<usize> = (0..found.len())
-        .filter(|&i| {
-            let f = &found[i];
-            !matches!(cache.entries.get(&key(f)), Some(e) if e.mtime == f.mtime && e.size == f.size)
-        })
-        .collect();
+/// Read tags for `pending`, several files at a time. Results are in the same order.
+pub fn read_pending(pending: &[Pending]) -> Vec<Meta> {
+    let next = AtomicUsize::new(0);
+    let done: Mutex<Vec<(usize, Meta)>> = Mutex::new(Vec::with_capacity(pending.len()));
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8);
+    std::thread::scope(|scope| {
+        for _ in 0..threads.min(pending.len()) {
+            scope.spawn(|| loop {
+                let n = next.fetch_add(1, Ordering::Relaxed);
+                let Some(p) = pending.get(n) else { break };
+                let m = meta::read_meta(&p.path);
+                done.lock().unwrap_or_else(|e| e.into_inner()).push((n, m));
+            });
+        }
+    });
+    let mut out = vec![Meta::default(); pending.len()];
+    for (i, m) in done.into_inner().unwrap_or_else(|e| e.into_inner()) {
+        out[i] = m;
+    }
+    out
+}
 
-    if !todo.is_empty() {
-        let next = AtomicUsize::new(0);
-        let done: Mutex<Vec<(usize, Meta)>> = Mutex::new(Vec::with_capacity(todo.len()));
-        let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8);
-        std::thread::scope(|scope| {
-            for _ in 0..threads.min(todo.len()) {
-                scope.spawn(|| loop {
-                    let n = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(&i) = todo.get(n) else { break };
-                    let m = meta::read_meta(&found[i].path);
-                    done.lock().unwrap_or_else(|e| e.into_inner()).push((i, m));
-                });
+impl Library {
+    /// Store freshly read tags on the tracks and in the cache.
+    pub fn apply_meta(&mut self, cache: &mut MetaCache, pending: &[Pending], metas: Vec<Meta>) {
+        for (p, meta) in pending.iter().zip(metas) {
+            if let Some(t) = self.tracks.get_mut(p.index) {
+                t.tag_title = meta.tag_title.clone();
+                t.artist = meta.artist.clone();
+                t.album = meta.album.clone();
+                t.duration_secs = meta.duration_secs;
             }
-        });
-        for (i, meta) in done.into_inner().unwrap_or_else(|e| e.into_inner()) {
-            let f = &found[i];
-            cache.entries.insert(key(f), CacheEntry { mtime: f.mtime, size: f.size, meta });
+            cache.entries.insert(p.path.display().to_string(), CacheEntry { mtime: p.mtime, size: p.size, meta });
         }
     }
+}
 
-    let seen: HashSet<String> = found.iter().map(key).collect();
-    cache.entries.retain(|k, _| seen.contains(k));
-    found.iter().map(|f| cache.entries.get(&key(f)).map(|e| e.meta.clone()).unwrap_or_default()).collect()
+impl MetaCache {
+    /// Forget files that are no longer in the library.
+    pub fn prune(&mut self, lib: &Library) {
+        let seen: HashSet<&str> = lib.tracks.iter().map(|t| t.path.as_str()).collect();
+        self.entries.retain(|k, _| seen.contains(k.as_str()));
+    }
+}
+
+/// Scan `root` completely (tags included) in one call.
+pub fn scan_with_cache(root: &Path, opts: &ScanOptions, cache: &mut MetaCache) -> Result<Library, String> {
+    let (mut lib, pending) = scan_quick(root, opts, cache)?;
+    let metas = read_pending(&pending);
+    lib.apply_meta(cache, &pending, metas);
+    cache.prune(&lib);
+    Ok(lib)
 }
 
 impl Library {
@@ -523,6 +540,31 @@ mod tests {
 
         let off = scan(dir.path(), &ScanOptions { read_tags: false, ..Default::default() }).unwrap();
         assert!(off.tracks.iter().all(|t| t.artist.is_none() && t.duration_secs.is_none()));
+    }
+
+    #[test]
+    fn quick_scan_lists_files_first_then_tags_fill_in() {
+        let dir = library_with_fixtures();
+        let opts = ScanOptions::default();
+        let mut cache = MetaCache::default();
+        let (mut lib, pending) = scan_quick(dir.path(), &opts, &cache).unwrap();
+        // Files are all listed immediately, with no tags and nothing opened.
+        assert_eq!(lib.tracks.len(), 3);
+        assert_eq!(pending.len(), 3);
+        assert!(lib.tracks.iter().all(|t| t.artist.is_none()));
+        // Reading in two chunks fills tracks in place and populates the cache.
+        for chunk in pending.chunks(2) {
+            let metas = read_pending(chunk);
+            lib.apply_meta(&mut cache, chunk, metas);
+        }
+        assert_eq!(lib.tracks.iter().filter(|t| t.artist.is_some()).count(), 2);
+        // A second quick scan finds everything in the cache.
+        let (again, pending) = scan_quick(dir.path(), &opts, &cache).unwrap();
+        assert!(pending.is_empty());
+        assert_eq!(again.tracks.iter().filter(|t| t.artist.is_some()).count(), 2);
+        // With tags off nothing is pending.
+        let off = ScanOptions { read_tags: false, ..ScanOptions::default() };
+        assert!(scan_quick(dir.path(), &off, &MetaCache::default()).unwrap().1.is_empty());
     }
 
     #[test]

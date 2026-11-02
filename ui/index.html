@@ -49,17 +49,20 @@
   ul.files { max-height: 220px; overflow: auto; padding-left: 18px; margin: 6px 0; font-size: 14px; }
   #audioBanner { display: none; background: #4a1f26; color: #ffd0d0; padding: 8px 16px;
                  border-bottom: 1px solid var(--line); align-items: center; gap: 12px; }
-  .grid { display: grid; grid-template-columns: repeat(var(--cols, 4), minmax(0, 1fr)); gap: 10px; }
-  #pads { max-height: 42vh; overflow-y: auto; flex-shrink: 0; }
-  #favSection { flex-shrink: 0; }
-  .sectionTitle { color: var(--muted); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; margin: 0 0 6px; }
-  .grid[data-density="sm"] .time { font-size: 26px; }
-  .grid[data-density="xs"] .time { font-size: 20px; }
-  .grid[data-density="xs"] .sub, .grid[data-density="xs"] .num { display: none; }
-  .grid[data-density="xs"] .label { font-size: 13px; }
-  .grid[data-density="xs"] .pad { padding: 6px 8px; gap: 4px; }
-  .grid[data-density="xs"] .btns .go { padding: 6px; font-size: 14px; }
-  .grid[data-density="xs"] .btns .clr { padding: 6px 8px; }
+  .grid { display: grid; gap: 10px; min-height: 0;
+          grid-template-columns: repeat(var(--cols, 4), minmax(0, 1fr));
+          grid-template-rows: repeat(var(--rows, 2), minmax(0, 1fr)); }
+  /* The deck (pads + favorites) takes a share of the window and divides it among its rows. */
+  #deck { flex: 0 0 var(--deck-h, 56%); min-height: 120px; display: flex; flex-direction: column; gap: 8px; }
+  #pads { flex: var(--pad-weight, 2) 1 0; }
+  #favSection { flex: var(--fav-weight, 1) 1 0; min-height: 0; display: flex; flex-direction: column; }
+  #favSection[hidden] { display: none; }
+  #favs { flex: 1; }
+  #split { flex: none; height: 8px; margin: -4px 0; cursor: row-resize; border-radius: 4px; position: relative; z-index: 2; }
+  #split::after { content: ""; position: absolute; left: 40%; right: 40%; top: 3px; height: 2px; background: var(--line); border-radius: 1px; }
+  #split:hover::after, body.splitting #split::after { background: var(--accent); }
+  body.splitting, body.splitting * { cursor: row-resize !important; user-select: none; }
+  .sectionTitle { color: var(--muted); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; margin: 0 0 4px; flex: none; }
   .pad.fav { border-top: 4px solid var(--accent); }
   .pad.dropover { outline: 3px dashed var(--accent); outline-offset: 2px; }
   .pad .sub.err { color: var(--bad); }
@@ -72,21 +75,32 @@
   tr.row.first td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
   input[type=number] { width: 80px; }
   .row { display: flex; gap: 16px; align-items: center; margin: 8px 0; }
-  .pad { background: var(--panel); border: 2px solid var(--line); border-radius: 10px;
-         padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; cursor: pointer; }
+  .pad { background: var(--panel); border: 2px solid var(--line); border-radius: 10px; min-width: 0; min-height: 0;
+         padding: 1.2cqh 1.5cqw; display: flex; flex-direction: column; gap: 1cqh; cursor: pointer;
+         overflow: hidden; container-type: size; }
   .pad.selected { border-color: var(--accent); }
   .pad.playing { background: #1d3326; border-color: #4fbf7a; }
-  .pad .num { color: var(--muted); font-size: 12px; }
-  .pad .label { font-weight: 600; line-height: 1.3; min-height: 2.6em; overflow: hidden; overflow-wrap: anywhere;
+  .pad .num { color: var(--muted); font-size: clamp(10px, 8cqh, 12px); flex: none; }
+  .pad .label { font-weight: 600; line-height: 1.25; flex: 1 1 0; min-height: 0; overflow: hidden; overflow-wrap: anywhere;
+                font-size: clamp(12px, 11cqh, 16px);
                 display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-  .pad .sub { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 1.2em; }
-  .pad .time { font-size: 34px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .pad .sub { color: var(--muted); font-size: clamp(10px, 8cqh, 13px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; }
+  .pad .time { font-size: clamp(14px, 22cqh, 36px); font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.1; flex: none; }
   .pad.low .time { color: var(--bad); }
-  .pad .bar { height: 6px; background: #232b42; border-radius: 3px; overflow: hidden; }
+  .pad .bar { height: 5px; flex: none; background: #232b42; border-radius: 3px; overflow: hidden; }
   .pad .bar > i { display: block; height: 100%; width: 0; background: var(--accent); }
-  .pad .btns { display: flex; gap: 8px; }
-  .pad .btns .go { flex: 1; font-size: 16px; padding: 10px; }
+  .pad .btns { display: flex; gap: 6px; flex: none; }
+  .pad .btns button { padding: 0 8px; height: clamp(22px, 17cqh, 40px); line-height: 1; }
+  .pad .btns .go { flex: 1; font-size: clamp(12px, 9cqh, 16px); }
   .pad .btns button:disabled { opacity: .4; cursor: default; }
+  /* Short cards drop the least important parts so the rest stays readable. */
+  @container (max-height: 150px) { .num { display: none; } }
+  @container (max-height: 115px) { .sub, .bar { display: none; } .btns button { height: clamp(20px, 22cqh, 32px); } }
+  @container (max-height: 80px)  {
+    .pad { flex-direction: row; align-items: center; gap: 8px; }
+    .label { flex: 1 1 0; -webkit-line-clamp: 2; font-size: 12px; }
+    .time { font-size: 14px; } .btns { flex-direction: row; } }
+  @container (max-width: 150px) { .sub { display: none; } .btns .clr { display: none; } }
   .stopall { border-color: var(--bad); }
 </style>
 </head>
@@ -102,11 +116,14 @@
 <div id="audioBanner"><span id="audioMsg"></span><button id="retryAudio">Retry audio</button></div>
 
 <main>
-  <section id="pads" class="grid"></section>
-  <section id="favSection">
-    <div class="sectionTitle">Favorites</div>
-    <div id="favs" class="grid"></div>
-  </section>
+  <div id="deck">
+    <section id="pads" class="grid"></section>
+    <section id="favSection">
+      <div class="sectionTitle">Favorites</div>
+      <div id="favs" class="grid"></div>
+    </section>
+  </div>
+  <div id="split" title="Drag to resize the pads"></div>
   <div class="bar">
     <select id="songbook"><option value="">All songbooks</option></select>
     <input id="q" type="search" placeholder="Page number or title… e.g. 123, or amazing grace" autofocus>
@@ -274,6 +291,7 @@ function afterScan(s) {
   haveFolder = !!s.music_dir;
   invoke('reload_favorites').catch(() => {});
   applySummary(s);
+  watchTags();
   return runSearch();
 }
 
@@ -553,8 +571,14 @@ function applyLayoutUi() {
   for (const id of ['pads', 'favs']) {
     const box = $(id);
     box.style.setProperty('--cols', layout.columns);
-    box.dataset.density = layout.columns >= 6 ? 'xs' : layout.columns >= 4 ? 'sm' : 'md';
   }
+  $('pads').style.setProperty('--rows', layout.rows);
+  $('favs').style.setProperty('--rows', Math.max(layout.fav_rows, 1));
+  // Rows share the deck's height: a favorite row gets about 60% of a pad row.
+  const deck = $('deck').style;
+  deck.setProperty('--pad-weight', layout.rows);
+  deck.setProperty('--fav-weight', layout.fav_rows * 0.6);
+  $('favSection').hidden = layout.fav_rows === 0;
   const n = layout.columns * layout.rows;
   if (mainEls.length !== n) buildPads(n);
   const key = `${layout.columns}x${layout.fav_rows}`;
@@ -595,6 +619,57 @@ $('q').addEventListener('keydown', (ev) => {
     loadIntoSelected(lastResults[0].id);
   }
 });
+
+// ---------------- splitter between the deck and the song list ----------------
+(function () {
+  let saved = null;
+  try { saved = Number(localStorage.getItem('deckPct')); } catch (e) {}
+  if (saved >= 15 && saved <= 85) $('deck').style.setProperty('--deck-h', saved + '%');
+  const split = $('split');
+  let dragging = false;
+  split.addEventListener('pointerdown', (ev) => {
+    dragging = true;
+    document.body.classList.add('splitting');
+    try { split.setPointerCapture(ev.pointerId); } catch (e) {}
+  });
+  split.addEventListener('pointermove', (ev) => {
+    if (!dragging) return;
+    const main = document.querySelector('main').getBoundingClientRect();
+    const top = $('deck').getBoundingClientRect().top;
+    const pct = Math.min(85, Math.max(15, ((ev.clientY - top) / (main.height - 32)) * 100));
+    $('deck').style.setProperty('--deck-h', pct.toFixed(1) + '%');
+    split.dataset.pct = pct.toFixed(1);
+  });
+  const stop = () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.classList.remove('splitting');
+    try { if (split.dataset.pct) localStorage.setItem('deckPct', split.dataset.pct); } catch (e) {}
+  };
+  split.addEventListener('pointerup', stop);
+  split.addEventListener('pointercancel', stop);
+})();
+
+// ---------------- background tag reading ----------------
+let tagTimer = null;
+function watchTags() {
+  clearTimeout(tagTimer);
+  let lastRefresh = 0;
+  const tick = async () => {
+    let p;
+    try { p = await invoke('get_scan_progress'); } catch (e) { return; }
+    if (!p || !p.total) return;
+    if (p.done < p.total) {
+      setStatus(`Reading tags ${p.done} / ${p.total}…`);
+      if (Date.now() - lastRefresh > 2500) { lastRefresh = Date.now(); runSearch(); }
+      tagTimer = setTimeout(tick, 600);
+    } else {
+      runSearch();
+      invoke('get_state').then(applySummary).catch(() => {});
+    }
+  };
+  tagTimer = setTimeout(tick, 300);
+}
 
 (async function init() {
   layout = await invoke('get_layout');
