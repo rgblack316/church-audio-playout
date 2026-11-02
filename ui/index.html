@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Church Playout</title>
+<style>
+  :root {
+    --bg: #11151f; --panel: #1a2030; --line: #2a3350; --text: #e8ecf6;
+    --muted: #8b95b3; --accent: #f0c450; --bad: #ff7a7a;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 16px/1.4 "Segoe UI", system-ui, sans-serif; display: flex;
+         flex-direction: column; height: 100vh; }
+  header { display: flex; gap: 12px; align-items: center; padding: 12px 16px;
+           background: var(--panel); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 18px; margin: 0 12px 0 0; color: var(--accent); }
+  #folder { color: var(--muted); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  button, select, input { font: inherit; color: var(--text); background: #232b42;
+         border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  main { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 16px; gap: 12px; }
+  .bar { display: flex; gap: 12px; }
+  #q { flex: 1; font-size: 20px; }
+  #songbook { min-width: 220px; }
+  #results { flex: 1; overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+  th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 600; }
+  tr.row:hover { background: #232b42; }
+  td.page { width: 80px; color: var(--accent); font-variant-numeric: tabular-nums; }
+  td.fmt { width: 80px; color: var(--muted); text-transform: uppercase; }
+  .empty { padding: 24px; color: var(--muted); }
+  footer { padding: 8px 16px; color: var(--muted); border-top: 1px solid var(--line);
+           background: var(--panel); display: flex; gap: 16px; align-items: center; }
+  footer .spacer { flex: 1; }
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line);
+           border-radius: 10px; width: min(720px, 92vw); }
+  dialog::backdrop { background: rgba(0,0,0,.6); }
+  dialog h2 { margin-top: 0; }
+  dialog input[type=text] { width: 100%; font-family: Consolas, monospace; }
+  .small { color: var(--muted); font-size: 13px; }
+  .err { color: var(--bad); min-height: 1.4em; }
+  ul.files { max-height: 220px; overflow: auto; padding-left: 18px; margin: 6px 0; font-size: 14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Church Playout</h1>
+  <div id="folder">No music folder selected</div>
+  <button id="choose">Choose music folder…</button>
+  <button id="rescan">Rescan</button>
+  <button id="settings">Settings</button>
+</header>
+
+<main>
+  <div class="bar">
+    <select id="songbook"><option value="">All songbooks</option></select>
+    <input id="q" type="search" placeholder="Page number or title… e.g. 123, or amazing grace" autofocus>
+  </div>
+  <div id="results"><div class="empty">Choose your music folder to begin.</div></div>
+</main>
+
+<footer>
+  <span id="status">Ready</span>
+  <span class="spacer"></span>
+  <span id="warn"></span>
+</footer>
+
+<dialog id="dlg">
+  <h2>Settings</h2>
+  <label for="pattern"><strong>Page number pattern</strong></label>
+  <p class="small">Regular expression with named groups <code>title</code> and <code>page</code>.
+     Leave blank to restore the default (page = trailing number in the file name).</p>
+  <input type="text" id="pattern" spellcheck="false">
+  <div class="err" id="patternErr"></div>
+  <p><strong>Files without a page number</strong> <span class="small" id="nopageCount"></span></p>
+  <ul class="files" id="nopage"></ul>
+  <p><strong>Folders or files that could not be read</strong> <span class="small" id="badCount"></span></p>
+  <ul class="files" id="bad"></ul>
+  <div style="display:flex; gap:12px; justify-content:flex-end">
+    <button id="applyPattern">Apply pattern &amp; rescan</button>
+    <button id="closeDlg">Close</button>
+  </div>
+</dialog>
+
+<script>
+const { invoke } = window.__TAURI__.core;
+const $ = (id) => document.getElementById(id);
+let searchTimer = null;
+
+function setStatus(text) { $('status').textContent = text; }
+
+function applySummary(s) {
+  $('folder').textContent = s.music_dir || 'No music folder selected';
+  const sel = $('songbook');
+  const current = sel.value;
+  sel.replaceChildren(new Option('All songbooks', ''));
+  for (const sb of s.songbooks) sel.add(new Option(sb, sb));
+  if (s.songbooks.includes(current)) sel.value = current;
+  setStatus(`${s.track_count} tracks in ${s.songbooks.length} songbook${s.songbooks.length === 1 ? '' : 's'}`);
+  const missing = s.without_page.length, bad = s.unreadable.length;
+  $('warn').textContent = [
+    missing ? `${missing} without page number` : '',
+    bad ? `${bad} unreadable` : '',
+  ].filter(Boolean).join(' · ');
+  fillList('nopage', s.without_page.map((t) => `${t.songbook} / ${t.file_name}`));
+  fillList('bad', s.unreadable.map((p) => `${p.path} — ${p.reason}`));
+  $('nopageCount').textContent = `(${missing})`;
+  $('badCount').textContent = `(${bad})`;
+  return s;
+}
+
+function fillList(id, items) {
+  const ul = $(id);
+  ul.replaceChildren();
+  for (const text of items.slice(0, 500)) {
+    const li = document.createElement('li');
+    li.textContent = text;
+    ul.append(li);
+  }
+}
+
+function renderResults(tracks, haveFolder) {
+  const box = $('results');
+  if (!haveFolder) {
+    box.innerHTML = '<div class="empty">Choose your music folder to begin.</div>';
+    return;
+  }
+  if (!tracks.length) {
+    box.innerHTML = '<div class="empty">No matching songs.</div>';
+    return;
+  }
+  const table = document.createElement('table');
+  const head = table.createTHead().insertRow();
+  for (const h of ['Page', 'Title', 'Songbook', 'Type']) {
+    const th = document.createElement('th');
+    th.textContent = h;
+    head.append(th);
+  }
+  const body = table.createTBody();
+  for (const t of tracks) {
+    const tr = body.insertRow();
+    tr.className = 'row';
+    tr.title = t.path;
+    const cells = [
+      [t.page ?? '—', 'page'], [t.title, ''], [t.songbook, ''], [t.ext, 'fmt'],
+    ];
+    for (const [text, cls] of cells) {
+      const td = tr.insertCell();
+      td.textContent = text;
+      if (cls) td.className = cls;
+    }
+  }
+  box.replaceChildren(table);
+}
+
+let haveFolder = false;
+
+async function runSearch() {
+  if (!haveFolder) return renderResults([], false);
+  try {
+    const tracks = await invoke('search', {
+      query: { text: $('q').value, songbook: $('songbook').value || null },
+    });
+    renderResults(tracks, true);
+  } catch (e) {
+    setStatus(`Search failed: ${e}`);
+  }
+}
+
+function afterScan(s) {
+  haveFolder = !!s.music_dir;
+  applySummary(s);
+  return runSearch();
+}
+
+async function chooseFolder() {
+  const picked = await window.__TAURI__.dialog.open({ directory: true, title: 'Choose the music folder' });
+  if (!picked) return;
+  setStatus('Scanning…');
+  try {
+    await afterScan(await invoke('set_music_dir', { path: picked }));
+  } catch (e) {
+    setStatus(`Could not use that folder: ${e}`);
+  }
+}
+
+async function rescan() {
+  setStatus('Scanning…');
+  try { await afterScan(await invoke('rescan')); }
+  catch (e) { setStatus(`Scan failed: ${e}`); }
+}
+
+$('choose').addEventListener('click', chooseFolder);
+$('rescan').addEventListener('click', rescan);
+$('songbook').addEventListener('change', runSearch);
+$('q').addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(runSearch, 120);
+});
+
+$('settings').addEventListener('click', async () => {
+  $('pattern').value = await invoke('get_page_pattern');
+  $('patternErr').textContent = '';
+  $('dlg').showModal();
+});
+$('closeDlg').addEventListener('click', () => $('dlg').close());
+$('applyPattern').addEventListener('click', async () => {
+  $('patternErr').textContent = '';
+  setStatus('Scanning…');
+  try {
+    await afterScan(await invoke('set_page_pattern', { pattern: $('pattern').value }));
+  } catch (e) {
+    $('patternErr').textContent = String(e);
+  }
+});
+
+(async function init() {
+  const s = await invoke('get_state');
+  haveFolder = !!s.music_dir;
+  applySummary(s);
+  if (haveFolder) await rescan(); else renderResults([], false);
+})();
+</script>
+</body>
+</html>
