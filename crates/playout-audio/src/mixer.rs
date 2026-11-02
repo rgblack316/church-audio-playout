@@ -1,7 +1,16 @@
 //! Pad state and the sample-mixing routine used by the audio callback.
 
 use crate::decode::Decoded;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+/// Which set of pads a pad index refers to: the main grid or the favorites bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Bank {
+    Main,
+    Fav,
+}
 
 pub struct Pad {
     pub decoded: Option<Arc<Decoded>>,
@@ -11,23 +20,48 @@ pub struct Pad {
     pub pos: f64,
     pub playing: bool,
     pub gain: f32,
+    /// A file is being decoded for this pad.
+    pub loading: bool,
+    /// Non-empty when the last load failed (shown on the pad).
+    pub error: String,
 }
 
 impl Pad {
     fn empty() -> Self {
-        Self { decoded: None, label: String::new(), sub: String::new(), pos: 0.0, playing: false, gain: 1.0 }
+        Self {
+            decoded: None,
+            label: String::new(),
+            sub: String::new(),
+            pos: 0.0,
+            playing: false,
+            gain: 1.0,
+            loading: false,
+            error: String::new(),
+        }
     }
 }
 
 pub struct Mixer {
     pub pads: Vec<Pad>,
-    /// When false, starting a pad stops all the others.
+    pub favs: Vec<Pad>,
+    /// When false, starting a pad stops all the others (in both banks).
     pub overlap: bool,
 }
 
 impl Mixer {
-    pub fn new(pad_count: usize) -> Self {
-        Self { pads: (0..pad_count).map(|_| Pad::empty()).collect(), overlap: true }
+    pub fn new(pad_count: usize, fav_count: usize) -> Self {
+        Self {
+            pads: (0..pad_count).map(|_| Pad::empty()).collect(),
+            favs: (0..fav_count).map(|_| Pad::empty()).collect(),
+            overlap: true,
+        }
+    }
+
+    pub fn bank(&mut self, bank: Bank) -> &mut Vec<Pad> {
+        match bank {
+            Bank::Main => &mut self.pads,
+            Bank::Fav => &mut self.favs,
+        }
     }
 
     pub fn resize(&mut self, pad_count: usize) {
@@ -43,7 +77,7 @@ impl Mixer {
         let oc = out_channels.max(1);
         let frames = buf.len() / oc;
 
-        for pad in self.pads.iter_mut() {
+        for pad in self.pads.iter_mut().chain(self.favs.iter_mut()) {
             if !pad.playing {
                 continue;
             }

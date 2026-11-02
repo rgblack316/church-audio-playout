@@ -46,15 +46,26 @@
   ul.files { max-height: 220px; overflow: auto; padding-left: 18px; margin: 6px 0; font-size: 14px; }
   #audioBanner { display: none; background: #4a1f26; color: #ffd0d0; padding: 8px 16px;
                  border-bottom: 1px solid var(--line); align-items: center; gap: 12px; }
-  #pads { display: grid; grid-template-columns: repeat(var(--cols, 4), minmax(0, 1fr)); gap: 10px;
-          max-height: 58vh; overflow-y: auto; flex-shrink: 0; }
-  #pads[data-density="sm"] .time { font-size: 26px; }
-  #pads[data-density="xs"] .time { font-size: 20px; }
-  #pads[data-density="xs"] .sub, #pads[data-density="xs"] .num { display: none; }
-  #pads[data-density="xs"] .label { font-size: 13px; }
-  #pads[data-density="xs"] .pad { padding: 6px 8px; gap: 4px; }
-  #pads[data-density="xs"] .btns .go { padding: 6px; font-size: 14px; }
-  #pads[data-density="xs"] .btns .clr { padding: 6px 8px; }
+  .grid { display: grid; grid-template-columns: repeat(var(--cols, 4), minmax(0, 1fr)); gap: 10px; }
+  #pads { max-height: 42vh; overflow-y: auto; flex-shrink: 0; }
+  #favSection { flex-shrink: 0; }
+  .sectionTitle { color: var(--muted); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; margin: 0 0 6px; }
+  .grid[data-density="sm"] .time { font-size: 26px; }
+  .grid[data-density="xs"] .time { font-size: 20px; }
+  .grid[data-density="xs"] .sub, .grid[data-density="xs"] .num { display: none; }
+  .grid[data-density="xs"] .label { font-size: 13px; }
+  .grid[data-density="xs"] .pad { padding: 6px 8px; gap: 4px; }
+  .grid[data-density="xs"] .btns .go { padding: 6px; font-size: 14px; }
+  .grid[data-density="xs"] .btns .clr { padding: 6px 8px; }
+  .pad.fav { border-top: 4px solid var(--accent); }
+  .pad.dropover { outline: 3px dashed var(--accent); outline-offset: 2px; }
+  .pad .sub.err { color: var(--bad); }
+  tr.row { cursor: grab; }
+  #results { user-select: none; }
+  body.dragging, body.dragging * { cursor: grabbing !important; user-select: none; }
+  .ghost { position: fixed; pointer-events: none; z-index: 1000; background: var(--accent); color: #111;
+           padding: 4px 10px; border-radius: 6px; font-weight: 600; max-width: 320px; overflow: hidden;
+           white-space: nowrap; text-overflow: ellipsis; box-shadow: 0 4px 14px rgba(0,0,0,.5); }
   tr.row.first td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
   input[type=number] { width: 80px; }
   .row { display: flex; gap: 16px; align-items: center; margin: 8px 0; }
@@ -87,7 +98,11 @@
 <div id="audioBanner"><span id="audioMsg"></span><button id="retryAudio">Retry audio</button></div>
 
 <main>
-  <section id="pads"></section>
+  <section id="pads" class="grid"></section>
+  <section id="favSection">
+    <div class="sectionTitle">Favorites</div>
+    <div id="favs" class="grid"></div>
+  </section>
   <div class="bar">
     <select id="songbook"><option value="">All songbooks</option></select>
     <input id="q" type="search" placeholder="Page number or title… e.g. 123, or amazing grace" autofocus>
@@ -97,7 +112,7 @@
 
 <footer>
   <span id="status">Ready</span>
-  <span class="small">Click a pad to select it · double-click a song to load it</span>
+  <span class="small">Click a pad to select it · double-click a song or drag it onto a pad or favorite</span>
   <span class="spacer"></span>
   <span id="warn"></span>
   <span id="device"></span>
@@ -111,9 +126,15 @@
     <label>Rows <input type="number" id="rows" min="1" max="8"></label>
     <span class="small" id="padTotal"></span>
   </div>
+  <div class="row">
+    <label>Favorite rows
+      <select id="favRows"><option value="0">None</option><option value="1">1</option><option value="2">2</option></select>
+    </label>
+    <span class="small">Favorites use the same number of columns as the pad grid.</span>
+  </div>
   <label><input type="checkbox" id="overlap"> Allow pads to play at the same time</label>
   <p class="small">Turn this off and starting a pad stops all the others. Making the grid smaller removes pads
-     from the end (loaded songs on them are cleared).</p>
+     from the end (loaded songs on them are cleared). Favorites keep their songs when you change the grid.</p>
   <div class="err" id="layoutErr"></div>
   <div style="display:flex; justify-content:flex-end; margin-bottom: 8px">
     <button id="applyLayout">Apply layout</button>
@@ -225,6 +246,7 @@ async function runSearch() {
 
 function afterScan(s) {
   haveFolder = !!s.music_dir;
+  invoke('reload_favorites').catch(() => {});
   applySummary(s);
   return runSearch();
 }
@@ -257,6 +279,7 @@ $('q').addEventListener('input', () => {
 $('settings').addEventListener('click', async () => {
   $('cols').value = layout.columns;
   $('rows').value = layout.rows;
+  $('favRows').value = String(layout.fav_rows);
   $('overlap').checked = layout.overlap;
   updatePadTotal();
   $('layoutErr').textContent = '';
@@ -275,10 +298,14 @@ $('applyPattern').addEventListener('click', async () => {
   }
 });
 
-// ---------------- pads ----------------
-let selectedPad = 0;
-let padEls = [];
-let lastPads = [];
+// ---------------- pads & favorites ----------------
+const FAV_STRIDE = 8;               // favorite slot = row * 8 + column, stable when columns change
+let selected = { bank: 'main', index: 0 };
+let mainEls = [];
+let favEls = new Map();             // slot -> element
+let lastSnap = { pads: [], favs: [] };
+let layout = { columns: 4, rows: 2, fav_rows: 1, overlap: true };
+let favKey = '';
 
 function fmt(sec) {
   const whole = Math.max(0, Math.ceil(sec - 1e-6));
@@ -287,89 +314,140 @@ function fmt(sec) {
 
 function showError(e) { setStatus(String(e)); }
 
+const bankList = (bank) => (bank === 'fav' ? lastSnap.favs : lastSnap.pads);
+const padName = (bank, index) => bank === 'fav'
+  ? `${String.fromCharCode(65 + Math.floor(index / FAV_STRIDE))}${(index % FAV_STRIDE) + 1}`
+  : `pad ${index + 1}`;
+
+function makePad(bank, index) {
+  const el = document.createElement('div');
+  el.className = bank === 'fav' ? 'pad fav' : 'pad';
+  el.dataset.bank = bank;
+  el.dataset.index = index;
+  el.innerHTML = '<div class="num"></div><div class="label"></div><div class="sub"></div>' +
+    '<div class="time">0:00</div><div class="bar"><i></i></div>' +
+    '<div class="btns"><button class="go"></button><button class="clr" title="Empty this pad">✕</button></div>';
+  el.querySelector('.num').textContent = bank === 'fav' ? `Favorite ${padName(bank, index)}` : `Pad ${index + 1}`;
+  el.addEventListener('click', () => select(bank, index));
+  el.querySelector('.go').addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    const p = bankList(bank)[index];
+    if (!p) return;
+    invoke(p.playing ? 'stop_pad' : 'play_pad', { bank, pad: index }).catch(showError);
+  });
+  el.querySelector('.clr').addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    invoke('clear_pad', { bank, pad: index }).catch(showError);
+  });
+  return el;
+}
+
 function buildPads(n) {
   const box = $('pads');
   box.replaceChildren();
-  padEls = [];
+  mainEls = [];
   for (let i = 0; i < n; i++) {
-    const el = document.createElement('div');
-    el.className = 'pad';
-    el.innerHTML = '<div class="num"></div><div class="label"></div><div class="sub"></div>' +
-      '<div class="time">0:00</div><div class="bar"><i></i></div>' +
-      '<div class="btns"><button class="go"></button><button class="clr" title="Empty this pad">\u2715</button></div>';
-    el.querySelector('.num').textContent = `Pad ${i + 1}`;
-    el.addEventListener('click', () => { selectedPad = i; paintSelection(); });
-    el.querySelector('.go').addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      const p = lastPads[i];
-      if (!p) return;
-      invoke(p.playing ? 'stop_pad' : 'play_pad', { pad: i }).catch(showError);
-    });
-    el.querySelector('.clr').addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      invoke('clear_pad', { pad: i }).catch(showError);
-    });
+    const el = makePad('main', i);
     box.append(el);
-    padEls.push(el);
+    mainEls.push(el);
   }
   paintSelection();
 }
 
-function paintSelection() {
-  padEls.forEach((el, i) => el.classList.toggle('selected', i === selectedPad));
+function buildFavs() {
+  const box = $('favs');
+  box.replaceChildren();
+  favEls = new Map();
+  for (let r = 0; r < layout.fav_rows; r++) {
+    for (let c = 0; c < layout.columns; c++) {
+      const slot = r * FAV_STRIDE + c;
+      const el = makePad('fav', slot);
+      box.append(el);
+      favEls.set(slot, el);
+    }
+  }
+  $('favSection').style.display = layout.fav_rows ? '' : 'none';
+  paintSelection();
 }
 
-function renderPads(s) {
-  lastPads = s.pads;
-  if (padEls.length !== s.pads.length) buildPads(s.pads.length);
+function select(bank, index) {
+  selected = { bank, index };
+  paintSelection();
+}
+
+function paintSelection() {
+  mainEls.forEach((el, i) => el.classList.toggle('selected', selected.bank === 'main' && selected.index === i));
+  favEls.forEach((el, slot) => el.classList.toggle('selected', selected.bank === 'fav' && selected.index === slot));
+}
+
+function paintPad(el, p) {
+  const remaining = Math.max(0, p.duration_secs - p.position_secs);
+  el.classList.toggle('playing', p.playing);
+  el.classList.toggle('low', p.playing && remaining <= 10);
+  el.title = p.error || '';
+  el.querySelector('.label').textContent =
+    p.loading ? 'Loading…' : (p.loaded || p.error) ? p.label : 'Empty';
+  const sub = el.querySelector('.sub');
+  sub.textContent = p.error || p.sub;
+  sub.classList.toggle('err', !!p.error);
+  el.querySelector('.time').textContent = p.loading ? '…' : !p.loaded ? '–:––'
+    : p.playing ? '−' + fmt(remaining) : fmt(p.duration_secs);
+  el.querySelector('.bar > i').style.width =
+    p.loaded && p.duration_secs > 0 ? `${(100 * p.position_secs / p.duration_secs).toFixed(1)}%` : '0';
+  const go = el.querySelector('.go');
+  go.textContent = p.playing ? '■ Stop' : '▶ Play';
+  go.disabled = !p.loaded;
+  el.querySelector('.clr').disabled = p.playing || (!p.loaded && !p.error);
+}
+
+function renderSnapshot(s) {
+  lastSnap = s;
+  if (mainEls.length !== s.pads.length) buildPads(s.pads.length);
 
   $('audioBanner').style.display = s.audio.ok ? 'none' : 'flex';
   if (!s.audio.ok) $('audioMsg').textContent = s.audio.error || 'Audio output is not available';
   $('device').textContent = s.audio.ok ? `Output: ${s.audio.device} (${s.audio.sample_rate} Hz)` : '';
 
-  s.pads.forEach((p, i) => {
-    const el = padEls[i];
-    const remaining = Math.max(0, p.duration_secs - p.position_secs);
-    el.classList.toggle('playing', p.playing);
-    el.classList.toggle('low', p.playing && remaining <= 10);
-    el.querySelector('.label').textContent = p.loaded ? p.label : 'Empty';
-    el.querySelector('.sub').textContent = p.sub;
-    el.querySelector('.time').textContent = !p.loaded ? '\u2013:\u2013\u2013'
-      : p.playing ? '\u2212' + fmt(remaining) : fmt(p.duration_secs);
-    el.querySelector('.bar > i').style.width =
-      p.loaded && p.duration_secs > 0 ? `${(100 * p.position_secs / p.duration_secs).toFixed(1)}%` : '0';
-    const go = el.querySelector('.go');
-    go.textContent = p.playing ? '\u25a0 Stop' : '\u25b6 Play';
-    go.disabled = !p.loaded;
-    el.querySelector('.clr').disabled = p.playing || !p.loaded;
-  });
+  s.pads.forEach((p, i) => paintPad(mainEls[i], p));
+  favEls.forEach((el, slot) => { if (s.favs[slot]) paintPad(el, s.favs[slot]); });
 }
 
 let polling = false;
 async function pollPads() {
   if (polling) return;
   polling = true;
-  try { renderPads(await invoke('get_pads')); } catch (e) { /* app closing */ }
+  try { renderSnapshot(await invoke('get_pads')); } catch (e) { /* app closing */ }
   polling = false;
 }
 
-async function loadIntoSelected(trackId) {
-  const pad = selectedPad;
+// Move the selection to the next empty pad (or favorite) after `target`.
+function advanceFrom(target) {
+  const order = target.bank === 'fav' ? [...favEls.keys()].sort((a, b) => a - b)
+                                      : lastSnap.pads.map((_, i) => i);
+  const list = bankList(target.bank);
+  const pos = order.indexOf(target.index);
+  for (let k = 1; k < order.length; k++) {
+    const idx = order[(pos + k) % order.length];
+    if (!list[idx] || (!list[idx].loaded && !list[idx].loading)) {
+      selected = { bank: target.bank, index: idx };
+      return;
+    }
+  }
+}
+
+async function loadInto(target, trackId, advance) {
   setStatus('Loading…');
   try {
-    await invoke('load_pad', { pad, trackId });
-    setStatus(`Loaded onto pad ${pad + 1}`);
-    const n = lastPads.length;
-    for (let k = 1; k < n; k++) {            // move the selection to the next empty pad
-      const idx = (pad + k) % n;
-      if (!lastPads[idx] || !lastPads[idx].loaded) { selectedPad = idx; break; }
-    }
+    await invoke('load_pad', { bank: target.bank, pad: target.index, trackId });
+    setStatus(`Loaded onto ${padName(target.bank, target.index)}`);
+    await pollPads();
+    if (advance) advanceFrom(target);
     paintSelection();
-    pollPads();
   } catch (e) {
     showError(e);
   }
 }
+const loadIntoSelected = (trackId) => loadInto(selected, trackId, true);
 
 $('results').addEventListener('dblclick', (ev) => {
   const tr = ev.target.closest('tr.row');
@@ -378,16 +456,75 @@ $('results').addEventListener('dblclick', (ev) => {
 $('stopAll').addEventListener('click', () => invoke('stop_all').catch(showError));
 $('retryAudio').addEventListener('click', () => invoke('restart_audio').catch(showError));
 
-// ---------------- layout ----------------
-let layout = { columns: 4, rows: 2, overlap: true };
+// ---------------- drag a song onto a pad or favorite ----------------
+// Pointer-based (not HTML5 drag-and-drop) so it behaves the same in every webview.
+let drag = null;
+const padUnder = (x, y) => {
+  const el = document.elementFromPoint(x, y);
+  return el ? el.closest('.pad') : null;
+};
 
+function endDrag() {
+  if (!drag) return;
+  if (drag.ghost) drag.ghost.remove();
+  if (drag.over) drag.over.classList.remove('dropover');
+  document.body.classList.remove('dragging');
+  drag = null;
+}
+
+$('results').addEventListener('pointerdown', (ev) => {
+  if (ev.button !== 0) return;
+  const tr = ev.target.closest('tr.row');
+  if (!tr) return;
+  drag = { id: Number(tr.dataset.id), title: tr.children[1].textContent,
+           x: ev.clientX, y: ev.clientY, active: false, ghost: null, over: null };
+});
+
+document.addEventListener('pointermove', (ev) => {
+  if (!drag) return;
+  if (!drag.active) {
+    if (Math.hypot(ev.clientX - drag.x, ev.clientY - drag.y) < 6) return;
+    drag.active = true;
+    drag.ghost = document.createElement('div');
+    drag.ghost.className = 'ghost';
+    drag.ghost.textContent = drag.title;
+    document.body.append(drag.ghost);
+    document.body.classList.add('dragging');
+  }
+  drag.ghost.style.left = `${ev.clientX + 14}px`;
+  drag.ghost.style.top = `${ev.clientY + 14}px`;
+  const pad = padUnder(ev.clientX, ev.clientY);
+  if (pad !== drag.over) {
+    if (drag.over) drag.over.classList.remove('dropover');
+    if (pad) pad.classList.add('dropover');
+    drag.over = pad;
+  }
+});
+
+document.addEventListener('pointerup', (ev) => {
+  if (!drag) return;
+  const d = drag;
+  const pad = d.active ? padUnder(ev.clientX, ev.clientY) : null;
+  endDrag();
+  if (pad) loadInto({ bank: pad.dataset.bank, index: Number(pad.dataset.index) }, d.id, false);
+});
+document.addEventListener('pointercancel', endDrag);
+document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') endDrag(); });
+
+// ---------------- layout ----------------
 function applyLayoutUi() {
-  const box = $('pads');
-  box.style.setProperty('--cols', layout.columns);
-  box.dataset.density = layout.columns >= 6 ? 'xs' : layout.columns >= 4 ? 'sm' : 'md';
+  for (const id of ['pads', 'favs']) {
+    const box = $(id);
+    box.style.setProperty('--cols', layout.columns);
+    box.dataset.density = layout.columns >= 6 ? 'xs' : layout.columns >= 4 ? 'sm' : 'md';
+  }
   const n = layout.columns * layout.rows;
-  if (selectedPad >= n) selectedPad = 0;
-  if (padEls.length !== n) buildPads(n);
+  if (mainEls.length !== n) buildPads(n);
+  const key = `${layout.columns}x${layout.fav_rows}`;
+  if (key !== favKey) { favKey = key; buildFavs(); }
+  const stillThere = selected.bank === 'main' ? selected.index < n : favEls.has(selected.index);
+  if (!stillThere) selected = { bank: 'main', index: 0 };
+  paintSelection();
 }
 
 function updatePadTotal() {
@@ -403,17 +540,18 @@ $('applyLayout').addEventListener('click', async () => {
     layout = await invoke('set_layout', {
       columns: Number($('cols').value),
       rows: Number($('rows').value),
+      favRows: Number($('favRows').value),
       overlap: $('overlap').checked,
     });
     applyLayoutUi();
     await pollPads();
-    setStatus(`Grid is now ${layout.columns} \u00d7 ${layout.rows}`);
+    setStatus(`Grid is now ${layout.columns} × ${layout.rows}, ${layout.fav_rows} favorite row${layout.fav_rows === 1 ? '' : 's'}`);
   } catch (e) {
     $('layoutErr').textContent = String(e);
   }
 });
 
-// Enter in the search box loads the top result onto the selected pad.
+// Enter in the search box loads the top result onto the selected pad or favorite.
 $('q').addEventListener('keydown', (ev) => {
   if (ev.key === 'Enter' && lastResults.length) {
     ev.preventDefault();

@@ -14,11 +14,16 @@ Windows church-service music playout app (Tauri 2 + Rust).
 - Phase 3/4 (done): search loads songs onto pads (double-click, or Enter for the top result);
   pad grid is configurable up to 8 columns x 8 rows (Settings, default 4 x 2); an overlap
   setting lets pads play together or makes each new pad stop the others. Saved between launches.
-- Next: favorites bar, keyboard shortcuts, polish.
+- Phase 5 (done): favorites bar under the pad grid (0-2 rows, same number of columns as the pad
+  grid, named A1, A2, B1...). Favorites are remembered between launches and pre-loaded into memory
+  at start-up so they fire instantly. A favorite whose file is missing shows the song title and
+  the error in red; it is retried after a rescan. Songs can be put on any pad or favorite by
+  double-click (selected pad), Enter in search (top result), or by dragging a row onto it.
+- Next: keyboard shortcuts, polish.
 
 ## Using it
-Click a pad to select it, double-click a song in the results to load it there (the selection
-then moves to the next empty pad). Play/Stop on each pad; Stop all in the header. If the audio
+Click a pad or favorite to select it, double-click a song in the results to load it there (the
+selection then moves to the next empty slot), or drag a song onto any pad or favorite. Play/Stop on each pad; Stop all in the header. If the audio
 device is missing or changes, use **Retry audio** in the red banner.
 
 ## Music folder layout

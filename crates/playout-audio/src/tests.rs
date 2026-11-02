@@ -1,5 +1,5 @@
 use super::*;
-use crate::mixer::Mixer;
+use crate::mixer::{Bank, Mixer};
 use std::{io::Write, sync::Arc};
 
 fn wav_bytes(rate: u32, channels: u16, frames: u32, f: impl Fn(u32) -> i16) -> Vec<u8> {
@@ -58,7 +58,7 @@ fn decodes_mono_wav_and_rejects_garbage() {
 
 #[test]
 fn mixer_plays_to_end_then_rewinds() {
-    let mut m = Mixer::new(2);
+    let mut m = Mixer::new(2, 0);
     // 4 mono frames at the output rate: full-scale positive.
     m.pads[0].decoded = Some(decoded(100, 1, vec![16384; 4]));
     m.pads[0].playing = true;
@@ -77,7 +77,7 @@ fn mixer_plays_to_end_then_rewinds() {
 
 #[test]
 fn mixer_sums_pads_clamps_and_resamples() {
-    let mut m = Mixer::new(2);
+    let mut m = Mixer::new(2, 0);
     m.pads[0].decoded = Some(decoded(100, 1, vec![30000; 10]));
     m.pads[1].decoded = Some(decoded(100, 1, vec![30000; 10]));
     m.pads[0].playing = true;
@@ -87,7 +87,7 @@ fn mixer_sums_pads_clamps_and_resamples() {
     assert!(buf.iter().all(|v| *v == 1.0), "two loud pads must clamp, got {buf:?}");
 
     // 50 Hz source into a 100 Hz output: position advances at half speed.
-    let mut m = Mixer::new(1);
+    let mut m = Mixer::new(1, 0);
     m.pads[0].decoded = Some(decoded(50, 1, vec![0, 20000, 0, 0, 0, 0, 0, 0]));
     m.pads[0].playing = true;
     let mut buf = vec![0.0f32; 4];
@@ -97,53 +97,80 @@ fn mixer_sums_pads_clamps_and_resamples() {
     assert!((buf[1] - (10000.0 / 32768.0)).abs() < 1e-4, "{buf:?}");
 }
 
+const M: Bank = Bank::Main;
+const F: Bank = Bank::Fav;
+
 #[test]
 fn engine_pad_bookkeeping_without_audio_device() {
-    let e = Engine::new(3);
+    let e = Engine::new(3, 2);
     let d = decoded(1000, 2, vec![0; 2000 * 3]); // 3 seconds stereo
-    assert!(e.check_loadable(0).is_ok());
-    assert!(e.check_loadable(9).is_err());
-    e.load(1, d, "Amazing Grace".into(), "Hymnal · p. 123".into()).unwrap();
+    assert!(e.check_loadable(M, 0).is_ok());
+    assert!(e.check_loadable(M, 9).is_err());
+    e.load(M, 1, d, "Amazing Grace".into(), "Hymnal · p. 123".into()).unwrap();
     let s = e.snapshot();
-    assert_eq!(s.pads.len(), 3);
+    assert_eq!((s.pads.len(), s.favs.len()), (3, 2));
     assert!(!s.pads[0].loaded && s.pads[1].loaded);
     assert_eq!(s.pads[1].label, "Amazing Grace");
     assert!((s.pads[1].duration_secs - 3.0).abs() < 1e-9);
     assert_eq!(s.pads[1].position_secs, 0.0);
-    assert!(e.play(0).is_err()); // empty pad or no device: either way an error
-    e.clear(1).unwrap();
+    assert!(e.play(M, 0).is_err()); // empty pad or no device: either way an error
+    e.clear(M, 1).unwrap();
     assert!(!e.snapshot().pads[1].loaded);
 }
 
 #[test]
 fn resize_keeps_loaded_pads_and_refuses_when_playing() {
-    let e = Engine::new(4);
-    e.load(1, decoded(1000, 1, vec![0; 3000]), "One".into(), String::new()).unwrap();
+    let e = Engine::new(4, 2);
+    e.load(M, 1, decoded(1000, 1, vec![0; 3000]), "One".into(), String::new()).unwrap();
     e.set_pad_count(8).unwrap();
     assert_eq!(e.snapshot().pads.len(), 8);
     assert!(e.snapshot().pads[1].loaded);
-    e.load(6, decoded(1000, 1, vec![0; 3000]), "Six".into(), String::new()).unwrap();
-    e.start(6).unwrap();
+    e.load(M, 6, decoded(1000, 1, vec![0; 3000]), "Six".into(), String::new()).unwrap();
+    e.start(M, 6).unwrap();
     assert!(e.set_pad_count(4).is_err(), "pad 7 is playing");
     assert_eq!(e.snapshot().pads.len(), 8);
-    e.stop(6);
+    e.stop(M, 6);
     e.set_pad_count(4).unwrap();
     assert_eq!(e.snapshot().pads.len(), 4);
     assert!(e.snapshot().pads[1].loaded);
+    assert_eq!(e.snapshot().favs.len(), 2, "favorites are not affected by the grid size");
 }
 
 #[test]
-fn overlap_off_stops_other_pads() {
-    let e = Engine::new(3);
-    for i in 0..3 {
-        e.load(i, decoded(1000, 1, vec![0; 3000]), format!("P{i}"), String::new()).unwrap();
+fn overlap_off_stops_pads_in_both_banks() {
+    let e = Engine::new(2, 2);
+    for (b, i) in [(M, 0), (M, 1), (F, 0), (F, 1)] {
+        e.load(b, i, decoded(1000, 1, vec![0; 3000]), format!("{b:?}{i}"), String::new()).unwrap();
     }
-    e.start(0).unwrap();
-    e.start(1).unwrap();
-    assert!(e.snapshot().pads[0].playing && e.snapshot().pads[1].playing, "overlap is on by default");
-    e.set_overlap(false);
-    e.start(2).unwrap();
+    e.start(M, 0).unwrap();
+    e.start(F, 0).unwrap();
     let s = e.snapshot();
-    assert!(!s.pads[0].playing && !s.pads[1].playing && s.pads[2].playing);
+    assert!(s.pads[0].playing && s.favs[0].playing, "overlap is on by default");
+    e.set_overlap(false);
+    e.start(F, 1).unwrap();
+    let s = e.snapshot();
+    assert!(!s.pads[0].playing && !s.favs[0].playing && s.favs[1].playing);
     assert!(!s.overlap);
+    e.start(M, 1).unwrap();
+    assert!(!e.snapshot().favs[1].playing && e.snapshot().pads[1].playing);
+    e.stop_all();
+    assert!(e.snapshot().pads.iter().chain(e.snapshot().favs.iter()).all(|p| !p.playing));
+}
+
+#[test]
+fn favorites_loading_and_error_state() {
+    let e = Engine::new(1, 3);
+    assert!(!e.is_busy_or_loaded(F, 2));
+    e.set_loading(F, 2, true);
+    assert!(e.snapshot().favs[2].loading);
+    assert!(e.is_busy_or_loaded(F, 2), "a pad being loaded must not be loaded twice");
+    e.set_error(F, 2, "Missing Song".into(), "cannot open file".into());
+    let p = e.snapshot().favs[2].clone();
+    assert!(!p.loading && !p.loaded);
+    assert_eq!((p.label.as_str(), p.error.as_str()), ("Missing Song", "cannot open file"));
+    assert!(!e.is_busy_or_loaded(F, 2), "an errored favorite can be retried");
+    e.load(F, 2, decoded(1000, 1, vec![0; 1000]), "Song".into(), "Book".into()).unwrap();
+    let p = e.snapshot().favs[2].clone();
+    assert!(p.loaded && p.error.is_empty());
+    assert!(e.is_busy_or_loaded(F, 2));
 }

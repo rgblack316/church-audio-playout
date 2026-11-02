@@ -2,7 +2,7 @@
 
 use playout_core::{scan, Library, Problem, Query, ScanOptions, Track, DEFAULT_PAGE_PATTERN};
 use serde::{Deserialize, Serialize};
-use playout_audio::{decode_file, Engine, Snapshot};
+use playout_audio::{decode_file, Bank, Engine, Snapshot};
 use std::{fs, path::Path, path::PathBuf, sync::Arc, sync::Mutex};
 use tauri::{AppHandle, Manager, State};
 
@@ -10,6 +10,11 @@ const DEFAULT_SEARCH_LIMIT: usize = 500;
 const DEFAULT_COLUMNS: usize = 4;
 const DEFAULT_ROWS: usize = 2;
 const MAX_GRID: usize = 8;
+const MAX_FAV_ROWS: usize = 2;
+const DEFAULT_FAV_ROWS: usize = 1;
+/// Favorite slots are addressed as row * MAX_GRID + column, so a favorite keeps its place
+/// when the number of columns changes.
+const FAV_SLOTS: usize = MAX_GRID * MAX_FAV_ROWS;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Settings {
@@ -24,6 +29,23 @@ struct Settings {
     /// Allow several pads to play at the same time.
     #[serde(default = "default_overlap")]
     overlap: bool,
+    /// Rows of favorite buttons (0-2); they always use the same column count as the pad grid.
+    #[serde(default = "default_fav_rows")]
+    fav_rows: usize,
+    /// Favorite songs by slot (row * 8 + column).
+    #[serde(default)]
+    favorites: Vec<Option<Favorite>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Favorite {
+    path: String,
+    title: String,
+    sub: String,
+}
+
+fn default_fav_rows() -> usize {
+    DEFAULT_FAV_ROWS
 }
 
 fn default_columns() -> usize {
@@ -48,6 +70,8 @@ impl Default for Settings {
             pad_columns: DEFAULT_COLUMNS,
             pad_rows: DEFAULT_ROWS,
             overlap: true,
+            fav_rows: DEFAULT_FAV_ROWS,
+            favorites: vec![None; FAV_SLOTS],
         }
     }
 }
@@ -102,6 +126,7 @@ fn save_settings(app: &AppHandle, settings: &Settings) -> Result<(), String> {
 fn ensure_init(app: &AppHandle, state: &mut AppState) {
     if !state.initialized {
         state.settings = load_settings(app);
+        state.settings.favorites.resize(FAV_SLOTS, None);
         state.initialized = true;
     }
 }
@@ -195,16 +220,26 @@ fn search(shared: State<'_, Shared>, mut query: Query) -> Vec<Track> {
 
 // ---------- playback ----------
 
+fn pad_sub(track: &Track) -> String {
+    match track.page {
+        Some(p) => format!("{} \u{b7} p. {}", track.songbook, p),
+        None => track.songbook.clone(),
+    }
+}
+
 #[tauri::command]
 fn get_pads(engine: State<'_, Engine>) -> Snapshot {
     engine.snapshot()
 }
 
-/// Decode a library track fully into memory and put it on a pad.
+/// Decode a library track fully into memory and put it on a pad or favorite slot.
+/// Favorites are also remembered between launches.
 #[tauri::command(async)]
 fn load_pad(
+    app: AppHandle,
     shared: State<'_, Shared>,
     engine: State<'_, Engine>,
+    bank: Bank,
     pad: usize,
     track_id: u32,
 ) -> Result<(), String> {
@@ -212,24 +247,38 @@ fn load_pad(
         let state = shared.lock().unwrap();
         state.library.get(track_id).cloned().ok_or("Track not found; try searching again")?
     };
-    engine.check_loadable(pad)?;
-    let decoded = decode_file(Path::new(&track.path))
-        .map_err(|e| format!("Cannot play \"{}\": {e}", track.file_name))?;
-    let sub = match track.page {
-        Some(p) => format!("{} \u{b7} p. {}", track.songbook, p),
-        None => track.songbook.clone(),
+    engine.check_loadable(bank, pad)?;
+    engine.set_loading(bank, pad, true);
+    let decoded = match decode_file(Path::new(&track.path)) {
+        Ok(d) => d,
+        Err(e) => {
+            engine.set_loading(bank, pad, false);
+            return Err(format!("Cannot play \"{}\": {e}", track.file_name));
+        }
     };
-    engine.load(pad, Arc::new(decoded), track.title.clone(), sub)
+    let sub = pad_sub(&track);
+    engine.load(bank, pad, Arc::new(decoded), track.title.clone(), sub.clone())?;
+    if bank == Bank::Fav {
+        let mut state = shared.lock().unwrap();
+        ensure_init(&app, &mut state);
+        state.settings.favorites[pad] = Some(Favorite {
+            path: track.path.clone(),
+            title: track.title.clone(),
+            sub,
+        });
+        save_settings(&app, &state.settings)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
-fn play_pad(engine: State<'_, Engine>, pad: usize) -> Result<(), String> {
-    engine.play(pad)
+fn play_pad(engine: State<'_, Engine>, bank: Bank, pad: usize) -> Result<(), String> {
+    engine.play(bank, pad)
 }
 
 #[tauri::command]
-fn stop_pad(engine: State<'_, Engine>, pad: usize) {
-    engine.stop(pad)
+fn stop_pad(engine: State<'_, Engine>, bank: Bank, pad: usize) {
+    engine.stop(bank, pad)
 }
 
 #[tauri::command]
@@ -237,14 +286,86 @@ fn stop_all(engine: State<'_, Engine>) {
     engine.stop_all()
 }
 
+/// Empty a pad. For a favorite this also forgets the saved song.
 #[tauri::command]
-fn clear_pad(engine: State<'_, Engine>, pad: usize) -> Result<(), String> {
-    engine.clear(pad)
+fn clear_pad(
+    app: AppHandle,
+    shared: State<'_, Shared>,
+    engine: State<'_, Engine>,
+    bank: Bank,
+    pad: usize,
+) -> Result<(), String> {
+    engine.clear(bank, pad)?;
+    if bank == Bank::Fav {
+        let mut state = shared.lock().unwrap();
+        ensure_init(&app, &mut state);
+        if let Some(slot) = state.settings.favorites.get_mut(pad) {
+            *slot = None;
+        }
+        save_settings(&app, &state.settings)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
 fn restart_audio(engine: State<'_, Engine>) {
     engine.restart_audio()
+}
+
+// ---------- favorites ----------
+
+fn visible_fav_slots(s: &Settings) -> Vec<usize> {
+    let l = layout_of(s);
+    (0..l.fav_rows)
+        .flat_map(|r| (0..l.columns).map(move |c| r * MAX_GRID + c))
+        .collect()
+}
+
+/// Decode saved favorites that are on screen and not loaded yet, a few at a time.
+/// Used at start-up, after a grid change, and to retry failures.
+fn preload_favorites(app: &AppHandle) {
+    let shared = app.state::<Shared>();
+    let engine = app.state::<Engine>();
+    let work: Vec<(usize, Favorite)> = {
+        let mut state = shared.lock().unwrap();
+        ensure_init(app, &mut state);
+        visible_fav_slots(&state.settings)
+            .into_iter()
+            .filter_map(|slot| {
+                state.settings.favorites[slot]
+                    .clone()
+                    .filter(|_| !engine.is_busy_or_loaded(Bank::Fav, slot))
+                    .map(|f| (slot, f))
+            })
+            .collect()
+    };
+    for (slot, _) in &work {
+        engine.set_loading(Bank::Fav, *slot, true);
+    }
+    let engine: &Engine = &engine;
+    for chunk in work.chunks(4) {
+        std::thread::scope(|scope| {
+            for (slot, fav) in chunk {
+                scope.spawn(move || match decode_file(Path::new(&fav.path)) {
+                    Ok(d) => {
+                        if engine
+                            .load(Bank::Fav, *slot, Arc::new(d), fav.title.clone(), fav.sub.clone())
+                            .is_err()
+                        {
+                            engine.set_loading(Bank::Fav, *slot, false);
+                        }
+                    }
+                    Err(e) => engine.set_error(Bank::Fav, *slot, fav.title.clone(), e),
+                });
+            }
+        });
+    }
+}
+
+/// Retry favorites that are missing or failed (e.g. after choosing a different music folder).
+#[tauri::command(async)]
+fn reload_favorites(app: AppHandle) {
+    preload_favorites(&app);
 }
 
 // ---------- pad layout ----------
@@ -253,6 +374,7 @@ fn restart_audio(engine: State<'_, Engine>) {
 struct Layout {
     columns: usize,
     rows: usize,
+    fav_rows: usize,
     overlap: bool,
 }
 
@@ -260,6 +382,7 @@ fn layout_of(s: &Settings) -> Layout {
     Layout {
         columns: s.pad_columns.clamp(1, MAX_GRID),
         rows: s.pad_rows.clamp(1, MAX_GRID),
+        fav_rows: s.fav_rows.min(MAX_FAV_ROWS),
         overlap: s.overlap,
     }
 }
@@ -287,19 +410,30 @@ fn set_layout(
     engine: State<'_, Engine>,
     columns: usize,
     rows: usize,
+    fav_rows: usize,
     overlap: bool,
 ) -> Result<Layout, String> {
     if !(1..=MAX_GRID).contains(&columns) || !(1..=MAX_GRID).contains(&rows) {
         return Err(format!("Columns and rows must be between 1 and {MAX_GRID}"));
     }
-    let mut state = shared.lock().unwrap();
-    ensure_init(&app, &mut state);
-    let l = Layout { columns, rows, overlap };
-    apply_layout(&engine, &l)?;
-    state.settings.pad_columns = columns;
-    state.settings.pad_rows = rows;
-    state.settings.overlap = overlap;
-    save_settings(&app, &state.settings)?;
+    if fav_rows > MAX_FAV_ROWS {
+        return Err(format!("Favorite rows must be between 0 and {MAX_FAV_ROWS}"));
+    }
+    let l = {
+        let mut state = shared.lock().unwrap();
+        ensure_init(&app, &mut state);
+        let l = Layout { columns, rows, fav_rows, overlap };
+        apply_layout(&engine, &l)?;
+        state.settings.pad_columns = columns;
+        state.settings.pad_rows = rows;
+        state.settings.fav_rows = fav_rows;
+        state.settings.overlap = overlap;
+        save_settings(&app, &state.settings)?;
+        l
+    };
+    // Favorites that just became visible need loading.
+    let handle = app.clone();
+    std::thread::spawn(move || preload_favorites(&handle));
     Ok(l)
 }
 
@@ -307,7 +441,13 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Shared::new(AppState::default()))
-        .manage(Engine::new(DEFAULT_COLUMNS * DEFAULT_ROWS))
+        .manage(Engine::new(DEFAULT_COLUMNS * DEFAULT_ROWS, FAV_SLOTS))
+        .setup(|app| {
+            // Load saved favorites into memory in the background so they fire instantly.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || preload_favorites(&handle));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_state,
             rescan,
@@ -322,9 +462,45 @@ fn main() {
             stop_all,
             clear_pad,
             restart_audio,
+            reload_favorites,
             get_layout,
             set_layout
         ])
         .run(tauri::generate_context!())
         .expect("error while running Church Playout");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_settings_files_still_load() {
+        let s: Settings = serde_json::from_str(r#"{"music_dir":"/m","pad_columns":3}"#).unwrap();
+        assert_eq!(s.music_dir.as_deref(), Some("/m"));
+        assert_eq!((s.pad_columns, s.pad_rows, s.fav_rows, s.overlap), (3, DEFAULT_ROWS, DEFAULT_FAV_ROWS, true));
+        assert!(s.favorites.is_empty()); // padded to FAV_SLOTS by ensure_init
+    }
+
+    #[test]
+    fn favorites_round_trip_and_visible_slots_follow_columns() {
+        let mut s = Settings::default();
+        s.favorites[9] = Some(Favorite { path: "/m/A 5.mp3".into(), title: "A".into(), sub: "Book \u{b7} p. 5".into() });
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.favorites.len(), FAV_SLOTS);
+        assert_eq!(back.favorites[9].as_ref().unwrap().title, "A");
+
+        s.pad_columns = 3;
+        s.fav_rows = 2;
+        assert_eq!(visible_fav_slots(&s), vec![0, 1, 2, 8, 9, 10]);
+        s.pad_columns = 8;
+        s.fav_rows = 1;
+        assert_eq!(visible_fav_slots(&s), vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        s.fav_rows = 0;
+        assert!(visible_fav_slots(&s).is_empty());
+        s.fav_rows = 9; // out-of-range values from a hand-edited file are clamped
+        s.pad_columns = 99;
+        assert_eq!(visible_fav_slots(&s).len(), FAV_SLOTS);
+    }
 }

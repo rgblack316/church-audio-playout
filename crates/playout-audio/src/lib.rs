@@ -6,6 +6,7 @@ pub mod mixer;
 mod mf;
 
 pub use decode::{decode_file, Decoded};
+pub use mixer::Bank;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use mixer::Mixer;
@@ -36,6 +37,8 @@ pub struct PadInfo {
     pub duration_secs: f64,
     pub position_secs: f64,
     pub playing: bool,
+    pub loading: bool,
+    pub error: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -43,6 +46,7 @@ pub struct Snapshot {
     pub audio: AudioStatus,
     pub overlap: bool,
     pub pads: Vec<PadInfo>,
+    pub favs: Vec<PadInfo>,
 }
 
 enum Ctl {
@@ -60,8 +64,8 @@ impl Engine {
     /// Create the engine and start the audio thread. Never fails: if there is no usable
     /// output device the problem is reported in `snapshot().audio` and can be retried
     /// with `restart_audio`.
-    pub fn new(pad_count: usize) -> Self {
-        let mixer = Arc::new(Mutex::new(Mixer::new(pad_count)));
+    pub fn new(pad_count: usize, fav_count: usize) -> Self {
+        let mixer = Arc::new(Mutex::new(Mixer::new(pad_count, fav_count)));
         let status = Arc::new(Mutex::new(AudioStatus {
             error: Some("Audio is starting…".into()),
             ..Default::default()
@@ -118,18 +122,54 @@ impl Engine {
     }
 
     /// Fail fast (before a slow decode) if the pad cannot accept a new file.
-    pub fn check_loadable(&self, pad: usize) -> Result<(), String> {
-        let m = lock(&self.mixer);
-        match m.pads.get(pad) {
+    pub fn check_loadable(&self, bank: Bank, pad: usize) -> Result<(), String> {
+        let mut m = lock(&self.mixer);
+        match m.bank(bank).get(pad) {
             None => Err("No such pad".into()),
             Some(p) if p.playing => Err("That pad is playing; stop it first".into()),
             Some(_) => Ok(()),
         }
     }
 
-    pub fn load(&self, pad: usize, decoded: Arc<Decoded>, label: String, sub: String) -> Result<(), String> {
+    pub fn is_busy_or_loaded(&self, bank: Bank, pad: usize) -> bool {
         let mut m = lock(&self.mixer);
-        let p = m.pads.get_mut(pad).ok_or("No such pad")?;
+        m.bank(bank).get(pad).map_or(true, |p| p.loading || p.decoded.is_some())
+    }
+
+    pub fn set_loading(&self, bank: Bank, pad: usize, loading: bool) {
+        if let Some(p) = lock(&self.mixer).bank(bank).get_mut(pad) {
+            p.loading = loading;
+            if loading {
+                p.error.clear();
+            }
+        }
+    }
+
+    /// Record that loading `label` onto this pad failed. The pad stays empty but shows the message.
+    pub fn set_error(&self, bank: Bank, pad: usize, label: String, message: String) {
+        if let Some(p) = lock(&self.mixer).bank(bank).get_mut(pad) {
+            if p.playing {
+                return;
+            }
+            p.decoded = None;
+            p.pos = 0.0;
+            p.label = label;
+            p.sub.clear();
+            p.error = message;
+            p.loading = false;
+        }
+    }
+
+    pub fn load(
+        &self,
+        bank: Bank,
+        pad: usize,
+        decoded: Arc<Decoded>,
+        label: String,
+        sub: String,
+    ) -> Result<(), String> {
+        let mut m = lock(&self.mixer);
+        let p = m.bank(bank).get_mut(pad).ok_or("No such pad")?;
         if p.playing {
             return Err("That pad is playing; stop it first".into());
         }
@@ -137,62 +177,70 @@ impl Engine {
         p.label = label;
         p.sub = sub;
         p.pos = 0.0;
+        p.loading = false;
+        p.error.clear();
         Ok(())
     }
 
-    pub fn clear(&self, pad: usize) -> Result<(), String> {
+    pub fn clear(&self, bank: Bank, pad: usize) -> Result<(), String> {
         let mut m = lock(&self.mixer);
-        let p = m.pads.get_mut(pad).ok_or("No such pad")?;
+        let p = m.bank(bank).get_mut(pad).ok_or("No such pad")?;
         if p.playing {
             return Err("That pad is playing; stop it first".into());
         }
         p.decoded = None;
         p.label.clear();
         p.sub.clear();
+        p.error.clear();
+        p.loading = false;
         p.pos = 0.0;
         Ok(())
     }
 
     /// Start a pad from the beginning. With overlap off, every other pad is stopped first.
-    pub fn play(&self, pad: usize) -> Result<(), String> {
+    pub fn play(&self, bank: Bank, pad: usize) -> Result<(), String> {
         if !lock(&self.status).ok {
             return Err("Audio output is not available".into());
         }
-        self.start(pad)
+        self.start(bank, pad)
     }
 
-    fn start(&self, pad: usize) -> Result<(), String> {
-        let mut m = lock(&self.mixer);
-        if pad >= m.pads.len() {
-            return Err("No such pad".into());
-        }
-        if m.pads[pad].decoded.is_none() {
-            return Err("That pad is empty".into());
+    fn start(&self, bank: Bank, pad: usize) -> Result<(), String> {
+        let mut guard = lock(&self.mixer);
+        let m = &mut *guard; // plain &mut so pads and favs can be borrowed separately
+        match m.bank(bank).get(pad) {
+            None => return Err("No such pad".into()),
+            Some(p) if p.decoded.is_none() => return Err("That pad is empty".into()),
+            Some(_) => {}
         }
         if !m.overlap {
-            for (i, p) in m.pads.iter_mut().enumerate() {
-                if i != pad {
-                    p.playing = false;
-                    p.pos = 0.0;
+            for (b, list) in [(Bank::Main, &mut m.pads), (Bank::Fav, &mut m.favs)] {
+                for (i, p) in list.iter_mut().enumerate() {
+                    if !(b == bank && i == pad) {
+                        p.playing = false;
+                        p.pos = 0.0;
+                    }
                 }
             }
         }
-        let p = &mut m.pads[pad];
+        let p = &mut m.bank(bank)[pad];
         p.pos = 0.0;
         p.playing = true;
         Ok(())
     }
 
     /// Stop a pad and rewind it to the start.
-    pub fn stop(&self, pad: usize) {
-        if let Some(p) = lock(&self.mixer).pads.get_mut(pad) {
+    pub fn stop(&self, bank: Bank, pad: usize) {
+        if let Some(p) = lock(&self.mixer).bank(bank).get_mut(pad) {
             p.playing = false;
             p.pos = 0.0;
         }
     }
 
     pub fn stop_all(&self) {
-        for p in lock(&self.mixer).pads.iter_mut() {
+        let mut guard = lock(&self.mixer);
+        let m = &mut *guard;
+        for p in m.pads.iter_mut().chain(m.favs.iter_mut()) {
             p.playing = false;
             p.pos = 0.0;
         }
@@ -201,27 +249,32 @@ impl Engine {
     pub fn snapshot(&self) -> Snapshot {
         let audio = lock(&self.status).clone();
         let m = lock(&self.mixer);
-        let pads = m
-            .pads
-            .iter()
-            .enumerate()
-            .map(|(index, p)| {
-                let (duration, position) = match &p.decoded {
-                    Some(d) => (d.duration_secs(), (p.pos / d.sample_rate.max(1) as f64).min(d.duration_secs())),
-                    None => (0.0, 0.0),
-                };
-                PadInfo {
-                    index,
-                    loaded: p.decoded.is_some(),
-                    label: p.label.clone(),
-                    sub: p.sub.clone(),
-                    duration_secs: duration,
-                    position_secs: position,
-                    playing: p.playing,
-                }
-            })
-            .collect();
-        Snapshot { audio, overlap: m.overlap, pads }
+        let info = |list: &[mixer::Pad]| -> Vec<PadInfo> {
+            list.iter()
+                .enumerate()
+                .map(|(index, p)| {
+                    let (duration, position) = match &p.decoded {
+                        Some(d) => (
+                            d.duration_secs(),
+                            (p.pos / d.sample_rate.max(1) as f64).min(d.duration_secs()),
+                        ),
+                        None => (0.0, 0.0),
+                    };
+                    PadInfo {
+                        index,
+                        loaded: p.decoded.is_some(),
+                        label: p.label.clone(),
+                        sub: p.sub.clone(),
+                        duration_secs: duration,
+                        position_secs: position,
+                        playing: p.playing,
+                        loading: p.loading,
+                        error: p.error.clone(),
+                    }
+                })
+                .collect()
+        };
+        Snapshot { audio, overlap: m.overlap, pads: info(&m.pads), favs: info(&m.favs) }
     }
 }
 
