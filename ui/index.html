@@ -46,7 +46,18 @@
   ul.files { max-height: 220px; overflow: auto; padding-left: 18px; margin: 6px 0; font-size: 14px; }
   #audioBanner { display: none; background: #4a1f26; color: #ffd0d0; padding: 8px 16px;
                  border-bottom: 1px solid var(--line); align-items: center; gap: 12px; }
-  #pads { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+  #pads { display: grid; grid-template-columns: repeat(var(--cols, 4), minmax(0, 1fr)); gap: 10px;
+          max-height: 58vh; overflow-y: auto; flex-shrink: 0; }
+  #pads[data-density="sm"] .time { font-size: 26px; }
+  #pads[data-density="xs"] .time { font-size: 20px; }
+  #pads[data-density="xs"] .sub, #pads[data-density="xs"] .num { display: none; }
+  #pads[data-density="xs"] .label { font-size: 13px; }
+  #pads[data-density="xs"] .pad { padding: 6px 8px; gap: 4px; }
+  #pads[data-density="xs"] .btns .go { padding: 6px; font-size: 14px; }
+  #pads[data-density="xs"] .btns .clr { padding: 6px 8px; }
+  tr.row.first td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+  input[type=number] { width: 80px; }
+  .row { display: flex; gap: 16px; align-items: center; margin: 8px 0; }
   .pad { background: var(--panel); border: 2px solid var(--line); border-radius: 10px;
          padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; cursor: pointer; }
   .pad.selected { border-color: var(--accent); }
@@ -94,6 +105,20 @@
 
 <dialog id="dlg">
   <h2>Settings</h2>
+  <p><strong>Pad grid</strong></p>
+  <div class="row">
+    <label>Columns <input type="number" id="cols" min="1" max="8"></label>
+    <label>Rows <input type="number" id="rows" min="1" max="8"></label>
+    <span class="small" id="padTotal"></span>
+  </div>
+  <label><input type="checkbox" id="overlap"> Allow pads to play at the same time</label>
+  <p class="small">Turn this off and starting a pad stops all the others. Making the grid smaller removes pads
+     from the end (loaded songs on them are cleared).</p>
+  <div class="err" id="layoutErr"></div>
+  <div style="display:flex; justify-content:flex-end; margin-bottom: 8px">
+    <button id="applyLayout">Apply layout</button>
+  </div>
+  <hr style="border-color: var(--line)">
   <label for="pattern"><strong>Page number pattern</strong></label>
   <p class="small">Regular expression with named groups <code>title</code> and <code>page</code>.
      Leave blank to restore the default (page = trailing number in the file name).</p>
@@ -169,6 +194,7 @@ function renderResults(tracks, haveFolder) {
     tr.className = 'row';
     tr.title = t.path;
     tr.dataset.id = t.id;
+    if (t === tracks[0] && $('q').value.trim()) tr.classList.add('first');
     const cells = [
       [t.page ?? '—', 'page'], [t.title, ''], [t.songbook, ''], [t.ext, 'fmt'],
     ];
@@ -182,6 +208,7 @@ function renderResults(tracks, haveFolder) {
 }
 
 let haveFolder = false;
+let lastResults = [];
 
 async function runSearch() {
   if (!haveFolder) return renderResults([], false);
@@ -189,6 +216,7 @@ async function runSearch() {
     const tracks = await invoke('search', {
       query: { text: $('q').value, songbook: $('songbook').value || null },
     });
+    lastResults = tracks;
     renderResults(tracks, true);
   } catch (e) {
     setStatus(`Search failed: ${e}`);
@@ -227,6 +255,11 @@ $('q').addEventListener('input', () => {
 });
 
 $('settings').addEventListener('click', async () => {
+  $('cols').value = layout.columns;
+  $('rows').value = layout.rows;
+  $('overlap').checked = layout.overlap;
+  updatePadTotal();
+  $('layoutErr').textContent = '';
   $('pattern').value = await invoke('get_page_pattern');
   $('patternErr').textContent = '';
   $('dlg').showModal();
@@ -319,7 +352,6 @@ async function pollPads() {
   try { renderPads(await invoke('get_pads')); } catch (e) { /* app closing */ }
   polling = false;
 }
-setInterval(pollPads, 100);
 
 async function loadIntoSelected(trackId) {
   const pad = selectedPad;
@@ -346,7 +378,53 @@ $('results').addEventListener('dblclick', (ev) => {
 $('stopAll').addEventListener('click', () => invoke('stop_all').catch(showError));
 $('retryAudio').addEventListener('click', () => invoke('restart_audio').catch(showError));
 
+// ---------------- layout ----------------
+let layout = { columns: 4, rows: 2, overlap: true };
+
+function applyLayoutUi() {
+  const box = $('pads');
+  box.style.setProperty('--cols', layout.columns);
+  box.dataset.density = layout.columns >= 6 ? 'xs' : layout.columns >= 4 ? 'sm' : 'md';
+  const n = layout.columns * layout.rows;
+  if (selectedPad >= n) selectedPad = 0;
+  if (padEls.length !== n) buildPads(n);
+}
+
+function updatePadTotal() {
+  const c = Number($('cols').value) || 0, r = Number($('rows').value) || 0;
+  $('padTotal').textContent = c && r ? `= ${c * r} pads` : '';
+}
+$('cols').addEventListener('input', updatePadTotal);
+$('rows').addEventListener('input', updatePadTotal);
+
+$('applyLayout').addEventListener('click', async () => {
+  $('layoutErr').textContent = '';
+  try {
+    layout = await invoke('set_layout', {
+      columns: Number($('cols').value),
+      rows: Number($('rows').value),
+      overlap: $('overlap').checked,
+    });
+    applyLayoutUi();
+    await pollPads();
+    setStatus(`Grid is now ${layout.columns} \u00d7 ${layout.rows}`);
+  } catch (e) {
+    $('layoutErr').textContent = String(e);
+  }
+});
+
+// Enter in the search box loads the top result onto the selected pad.
+$('q').addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter' && lastResults.length) {
+    ev.preventDefault();
+    loadIntoSelected(lastResults[0].id);
+  }
+});
+
 (async function init() {
+  layout = await invoke('get_layout');
+  applyLayoutUi();
+  setInterval(pollPads, 100);
   const s = await invoke('get_state');
   haveFolder = !!s.music_dir;
   applySummary(s);

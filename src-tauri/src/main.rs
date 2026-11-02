@@ -7,7 +7,9 @@ use std::{fs, path::Path, path::PathBuf, sync::Arc, sync::Mutex};
 use tauri::{AppHandle, Manager, State};
 
 const DEFAULT_SEARCH_LIMIT: usize = 500;
-const DEFAULT_PADS: usize = 4;
+const DEFAULT_COLUMNS: usize = 4;
+const DEFAULT_ROWS: usize = 2;
+const MAX_GRID: usize = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Settings {
@@ -15,6 +17,23 @@ struct Settings {
     music_dir: Option<String>,
     #[serde(default = "default_pattern")]
     page_pattern: String,
+    #[serde(default = "default_columns")]
+    pad_columns: usize,
+    #[serde(default = "default_rows")]
+    pad_rows: usize,
+    /// Allow several pads to play at the same time.
+    #[serde(default = "default_overlap")]
+    overlap: bool,
+}
+
+fn default_columns() -> usize {
+    DEFAULT_COLUMNS
+}
+fn default_rows() -> usize {
+    DEFAULT_ROWS
+}
+fn default_overlap() -> bool {
+    true
 }
 
 fn default_pattern() -> String {
@@ -26,6 +45,9 @@ impl Default for Settings {
         Self {
             music_dir: None,
             page_pattern: default_pattern(),
+            pad_columns: DEFAULT_COLUMNS,
+            pad_rows: DEFAULT_ROWS,
+            overlap: true,
         }
     }
 }
@@ -225,11 +247,67 @@ fn restart_audio(engine: State<'_, Engine>) {
     engine.restart_audio()
 }
 
+// ---------- pad layout ----------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Layout {
+    columns: usize,
+    rows: usize,
+    overlap: bool,
+}
+
+fn layout_of(s: &Settings) -> Layout {
+    Layout {
+        columns: s.pad_columns.clamp(1, MAX_GRID),
+        rows: s.pad_rows.clamp(1, MAX_GRID),
+        overlap: s.overlap,
+    }
+}
+
+fn apply_layout(engine: &Engine, l: &Layout) -> Result<(), String> {
+    engine.set_pad_count(l.columns * l.rows)?;
+    engine.set_overlap(l.overlap);
+    Ok(())
+}
+
+/// Saved layout; also configures the engine to match (called once by the UI at start-up).
+#[tauri::command]
+fn get_layout(app: AppHandle, shared: State<'_, Shared>, engine: State<'_, Engine>) -> Layout {
+    let mut state = shared.lock().unwrap();
+    ensure_init(&app, &mut state);
+    let l = layout_of(&state.settings);
+    let _ = apply_layout(&engine, &l);
+    l
+}
+
+#[tauri::command]
+fn set_layout(
+    app: AppHandle,
+    shared: State<'_, Shared>,
+    engine: State<'_, Engine>,
+    columns: usize,
+    rows: usize,
+    overlap: bool,
+) -> Result<Layout, String> {
+    if !(1..=MAX_GRID).contains(&columns) || !(1..=MAX_GRID).contains(&rows) {
+        return Err(format!("Columns and rows must be between 1 and {MAX_GRID}"));
+    }
+    let mut state = shared.lock().unwrap();
+    ensure_init(&app, &mut state);
+    let l = Layout { columns, rows, overlap };
+    apply_layout(&engine, &l)?;
+    state.settings.pad_columns = columns;
+    state.settings.pad_rows = rows;
+    state.settings.overlap = overlap;
+    save_settings(&app, &state.settings)?;
+    Ok(l)
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Shared::new(AppState::default()))
-        .manage(Engine::new(DEFAULT_PADS))
+        .manage(Engine::new(DEFAULT_COLUMNS * DEFAULT_ROWS))
         .invoke_handler(tauri::generate_handler![
             get_state,
             rescan,
@@ -243,7 +321,9 @@ fn main() {
             stop_pad,
             stop_all,
             clear_pad,
-            restart_audio
+            restart_audio,
+            get_layout,
+            set_layout
         ])
         .run(tauri::generate_context!())
         .expect("error while running Church Playout");

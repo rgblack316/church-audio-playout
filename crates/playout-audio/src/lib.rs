@@ -106,8 +106,15 @@ impl Engine {
         lock(&self.mixer).overlap = overlap;
     }
 
-    pub fn set_pad_count(&self, n: usize) {
-        lock(&self.mixer).resize(n.clamp(1, 64));
+    /// Change the number of pads. Refuses if a pad that would be removed is playing.
+    pub fn set_pad_count(&self, n: usize) -> Result<(), String> {
+        let n = n.clamp(1, 64);
+        let mut m = lock(&self.mixer);
+        if m.pads.iter().skip(n).any(|p| p.playing) {
+            return Err("Stop the pads that would be removed first".into());
+        }
+        m.resize(n);
+        Ok(())
     }
 
     /// Fail fast (before a slow decode) if the pad cannot accept a new file.
@@ -151,6 +158,10 @@ impl Engine {
         if !lock(&self.status).ok {
             return Err("Audio output is not available".into());
         }
+        self.start(pad)
+    }
+
+    fn start(&self, pad: usize) -> Result<(), String> {
         let mut m = lock(&self.mixer);
         if pad >= m.pads.len() {
             return Err("No such pad".into());

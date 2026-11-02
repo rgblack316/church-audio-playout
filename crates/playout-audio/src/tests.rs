@@ -114,3 +114,36 @@ fn engine_pad_bookkeeping_without_audio_device() {
     e.clear(1).unwrap();
     assert!(!e.snapshot().pads[1].loaded);
 }
+
+#[test]
+fn resize_keeps_loaded_pads_and_refuses_when_playing() {
+    let e = Engine::new(4);
+    e.load(1, decoded(1000, 1, vec![0; 3000]), "One".into(), String::new()).unwrap();
+    e.set_pad_count(8).unwrap();
+    assert_eq!(e.snapshot().pads.len(), 8);
+    assert!(e.snapshot().pads[1].loaded);
+    e.load(6, decoded(1000, 1, vec![0; 3000]), "Six".into(), String::new()).unwrap();
+    e.start(6).unwrap();
+    assert!(e.set_pad_count(4).is_err(), "pad 7 is playing");
+    assert_eq!(e.snapshot().pads.len(), 8);
+    e.stop(6);
+    e.set_pad_count(4).unwrap();
+    assert_eq!(e.snapshot().pads.len(), 4);
+    assert!(e.snapshot().pads[1].loaded);
+}
+
+#[test]
+fn overlap_off_stops_other_pads() {
+    let e = Engine::new(3);
+    for i in 0..3 {
+        e.load(i, decoded(1000, 1, vec![0; 3000]), format!("P{i}"), String::new()).unwrap();
+    }
+    e.start(0).unwrap();
+    e.start(1).unwrap();
+    assert!(e.snapshot().pads[0].playing && e.snapshot().pads[1].playing, "overlap is on by default");
+    e.set_overlap(false);
+    e.start(2).unwrap();
+    let s = e.snapshot();
+    assert!(!s.pads[0].playing && !s.pads[1].playing && s.pads[2].playing);
+    assert!(!s.overlap);
+}

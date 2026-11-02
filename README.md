@@ -11,7 +11,10 @@ Windows church-service music playout app (Tauri 2 + Rust).
   time remaining and turns red in the last 10 seconds. MP3, WAV, FLAC, OGG and M4A/AAC are
   decoded directly; WMA (and anything else symphonia cannot read) falls back to Windows
   Media Foundation. Files longer than 45 minutes are refused.
-- Next: configurable pad grid and overlap setting, favorites bar, keyboard shortcuts.
+- Phase 3/4 (done): search loads songs onto pads (double-click, or Enter for the top result);
+  pad grid is configurable up to 8 columns x 8 rows (Settings, default 4 x 2); an overlap
+  setting lets pads play together or makes each new pad stop the others. Saved between launches.
+- Next: favorites bar, keyboard shortcuts, polish.
 
 ## Using it
 Click a pad to select it, double-click a song in the results to load it there (the selection
