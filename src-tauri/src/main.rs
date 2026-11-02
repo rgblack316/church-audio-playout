@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use playout_core::{scan, Library, Problem, Query, ScanOptions, Track, DEFAULT_PAGE_PATTERN};
+use playout_core::{
+    scan_with_cache, Library, MetaCache, Problem, Query, ScanOptions, Track, DEFAULT_PAGE_PATTERN,
+};
 use serde::{Deserialize, Serialize};
 use playout_audio::{decode_file, Bank, Engine, Snapshot};
 use std::{fs, path::Path, path::PathBuf, sync::Arc, sync::Mutex};
@@ -32,6 +34,9 @@ struct Settings {
     /// Rows of favorite buttons (0-2); they always use the same column count as the pad grid.
     #[serde(default = "default_fav_rows")]
     fav_rows: usize,
+    /// Read ID3 / other tags (artist, album, length) when scanning.
+    #[serde(default = "default_overlap")]
+    read_tags: bool,
     /// Favorite songs by slot (row * 8 + column).
     #[serde(default)]
     favorites: Vec<Option<Favorite>>,
@@ -71,6 +76,7 @@ impl Default for Settings {
             pad_rows: DEFAULT_ROWS,
             overlap: true,
             fav_rows: DEFAULT_FAV_ROWS,
+            read_tags: true,
             favorites: vec![None; FAV_SLOTS],
         }
     }
@@ -81,9 +87,14 @@ struct AppState {
     initialized: bool,
     settings: Settings,
     library: Library,
+    meta_cache: MetaCache,
+    cache_path: Option<PathBuf>,
 }
 
 type Shared = Mutex<AppState>;
+
+/// Only one library scan runs at a time.
+struct ScanLock(Mutex<()>);
 
 #[derive(Serialize)]
 struct Summary {
@@ -92,6 +103,7 @@ struct Summary {
     songbooks: Vec<String>,
     without_page: Vec<Track>,
     unreadable: Vec<Problem>,
+    read_tags: bool,
 }
 
 fn summarize(state: &AppState) -> Summary {
@@ -101,6 +113,7 @@ fn summarize(state: &AppState) -> Summary {
         songbooks: state.library.songbooks(),
         without_page: state.library.without_page().into_iter().cloned().collect(),
         unreadable: state.library.problems.clone(),
+        read_tags: state.settings.read_tags,
     }
 }
 
@@ -127,20 +140,51 @@ fn ensure_init(app: &AppHandle, state: &mut AppState) {
     if !state.initialized {
         state.settings = load_settings(app);
         state.settings.favorites.resize(FAV_SLOTS, None);
+        state.cache_path = app.path().app_config_dir().ok().map(|d| d.join("tag_cache.json"));
+        if let Some(p) = &state.cache_path {
+            state.meta_cache = MetaCache::load(p);
+        }
         state.initialized = true;
     }
 }
 
-fn run_scan(state: &mut AppState) -> Result<(), String> {
-    state.library = Library::default();
-    if let Some(dir) = state.settings.music_dir.clone() {
-        let opts = ScanOptions {
-            page_pattern: state.settings.page_pattern.clone(),
-            ..ScanOptions::default()
-        };
-        state.library = scan(Path::new(&dir), &opts)?;
+/// Scan the music folder with the current settings and store the result.
+/// The state lock is NOT held while files are read, so the rest of the app stays responsive.
+fn do_scan(app: &AppHandle) -> Result<(), String> {
+    let scan_lock = app.state::<ScanLock>();
+    let _one_at_a_time = scan_lock.0.lock().unwrap_or_else(|e| e.into_inner());
+    let shared = app.state::<Shared>();
+    let (dir, opts, mut cache, cache_path) = {
+        let mut state = shared.lock().unwrap();
+        ensure_init(app, &mut state);
+        (
+            state.settings.music_dir.clone(),
+            ScanOptions {
+                page_pattern: state.settings.page_pattern.clone(),
+                read_tags: state.settings.read_tags,
+                ..ScanOptions::default()
+            },
+            std::mem::take(&mut state.meta_cache),
+            state.cache_path.clone(),
+        )
+    };
+    let result = match &dir {
+        Some(d) => scan_with_cache(Path::new(d), &opts, &mut cache),
+        None => Ok(Library::default()),
+    };
+    if opts.read_tags && result.is_ok() {
+        if let Some(p) = &cache_path {
+            let _ = cache.save(p);
+        }
     }
+    let mut state = shared.lock().unwrap();
+    state.meta_cache = cache;
+    state.library = result?;
     Ok(())
+}
+
+fn summary_now(shared: &Shared) -> Summary {
+    summarize(&shared.lock().unwrap())
 }
 
 /// Current settings and library summary (loads settings from disk on first call).
@@ -154,52 +198,47 @@ fn get_state(app: AppHandle, shared: State<'_, Shared>) -> Summary {
 /// (Re)scan the music folder. Runs off the main thread so the window stays responsive.
 #[tauri::command(async)]
 fn rescan(app: AppHandle, shared: State<'_, Shared>) -> Result<Summary, String> {
-    let mut state = shared.lock().unwrap();
-    ensure_init(&app, &mut state);
-    run_scan(&mut state)?;
-    Ok(summarize(&state))
+    do_scan(&app)?;
+    Ok(summary_now(&shared))
 }
 
-#[tauri::command(async)]
-fn set_music_dir(
-    app: AppHandle,
-    shared: State<'_, Shared>,
-    path: String,
+/// Run `change` on the settings, rescan, and keep the change only if the scan worked.
+fn change_and_rescan(
+    app: &AppHandle,
+    shared: &Shared,
+    change: impl FnOnce(&mut Settings),
 ) -> Result<Summary, String> {
-    let mut state = shared.lock().unwrap();
-    ensure_init(&app, &mut state);
-    let previous = state.settings.music_dir.clone();
-    state.settings.music_dir = Some(path);
-    if let Err(e) = run_scan(&mut state) {
-        state.settings.music_dir = previous;
-        let _ = run_scan(&mut state);
-        return Err(e);
-    }
-    save_settings(&app, &state.settings)?;
-    Ok(summarize(&state))
-}
-
-#[tauri::command(async)]
-fn set_page_pattern(
-    app: AppHandle,
-    shared: State<'_, Shared>,
-    pattern: String,
-) -> Result<Summary, String> {
-    let mut state = shared.lock().unwrap();
-    ensure_init(&app, &mut state);
-    let previous = state.settings.page_pattern.clone();
-    state.settings.page_pattern = if pattern.trim().is_empty() {
-        default_pattern()
-    } else {
-        pattern
+    let previous = {
+        let mut state = shared.lock().unwrap();
+        ensure_init(app, &mut state);
+        let previous = state.settings.clone();
+        change(&mut state.settings);
+        previous
     };
-    if let Err(e) = run_scan(&mut state) {
-        state.settings.page_pattern = previous;
-        let _ = run_scan(&mut state);
+    if let Err(e) = do_scan(app) {
+        shared.lock().unwrap().settings = previous;
         return Err(e);
     }
-    save_settings(&app, &state.settings)?;
+    let state = shared.lock().unwrap();
+    save_settings(app, &state.settings)?;
     Ok(summarize(&state))
+}
+
+#[tauri::command(async)]
+fn set_music_dir(app: AppHandle, shared: State<'_, Shared>, path: String) -> Result<Summary, String> {
+    change_and_rescan(&app, &shared, |s| s.music_dir = Some(path))
+}
+
+#[tauri::command(async)]
+fn set_page_pattern(app: AppHandle, shared: State<'_, Shared>, pattern: String) -> Result<Summary, String> {
+    change_and_rescan(&app, &shared, |s| {
+        s.page_pattern = if pattern.trim().is_empty() { default_pattern() } else { pattern };
+    })
+}
+
+#[tauri::command(async)]
+fn set_read_tags(app: AppHandle, shared: State<'_, Shared>, enabled: bool) -> Result<Summary, String> {
+    change_and_rescan(&app, &shared, |s| s.read_tags = enabled)
 }
 
 #[tauri::command]
@@ -441,6 +480,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Shared::new(AppState::default()))
+        .manage(ScanLock(Mutex::new(())))
         .manage(Engine::new(DEFAULT_COLUMNS * DEFAULT_ROWS, FAV_SLOTS))
         .setup(|app| {
             // Load saved favorites into memory in the background so they fire instantly.
@@ -453,6 +493,7 @@ fn main() {
             rescan,
             set_music_dir,
             set_page_pattern,
+            set_read_tags,
             get_page_pattern,
             search,
             get_pads,

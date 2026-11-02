@@ -174,3 +174,20 @@ fn favorites_loading_and_error_state() {
     assert!(p.loaded && p.error.is_empty());
     assert!(e.is_busy_or_loaded(F, 2));
 }
+
+#[test]
+fn pcm_depth_conversion() {
+    use crate::decode::pcm_bytes_to_i16;
+    let conv = |bytes: &[u8], bits| {
+        let mut v = Vec::new();
+        pcm_bytes_to_i16(bytes, bits, &mut v).map(|_| v)
+    };
+    assert_eq!(conv(&[0x34, 0x12, 0xFF, 0x7F], 16).unwrap(), vec![0x1234, 0x7FFF]);
+    // 24-bit: keep the top 16 bits
+    assert_eq!(conv(&[0x00, 0x34, 0x12, 0x99, 0xFF, 0x7F], 24).unwrap(), vec![0x1234, 0x7FFF]);
+    // 32-bit: keep the top 16 bits
+    assert_eq!(conv(&[0, 0, 0x34, 0x12], 32).unwrap(), vec![0x1234]);
+    // 8-bit unsigned: 128 is silence
+    assert_eq!(conv(&[128, 255, 0], 8).unwrap(), vec![0, 127 << 8, -128 << 8]);
+    assert!(conv(&[0; 4], 12).is_err());
+}

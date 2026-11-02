@@ -4,10 +4,22 @@
 //! The first folder under the root is the songbook. The page number is
 //! the trailing number of the file name (rule is configurable).
 
+pub mod meta;
+
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    },
+    time::UNIX_EPOCH,
+};
 use walkdir::WalkDir;
+
+pub use meta::Meta;
 
 pub const DEFAULT_EXTENSIONS: &[&str] = &["mp3", "wav", "flac", "ogg", "m4a", "aac", "wma"];
 
@@ -18,7 +30,7 @@ pub const DEFAULT_PAGE_PATTERN: &str =
 /// Songbook name used for files placed directly in the root folder.
 pub const ROOT_SONGBOOK: &str = "(Root)";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Track {
     pub id: u32,
     /// Full path to the audio file.
@@ -26,8 +38,14 @@ pub struct Track {
     pub songbook: String,
     pub title: String,
     pub page: Option<u32>,
+    /// Full file name including the extension.
     pub file_name: String,
     pub ext: String,
+    /// Title / artist / album stored inside the file, if any.
+    pub tag_title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub duration_secs: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -40,6 +58,8 @@ pub struct Problem {
 pub struct ScanOptions {
     pub extensions: Vec<String>,
     pub page_pattern: String,
+    /// Read ID3 / other tags (slower the first time; results are cached).
+    pub read_tags: bool,
 }
 
 impl Default for ScanOptions {
@@ -47,6 +67,7 @@ impl Default for ScanOptions {
         Self {
             extensions: DEFAULT_EXTENSIONS.iter().map(|s| s.to_string()).collect(),
             page_pattern: DEFAULT_PAGE_PATTERN.to_string(),
+            read_tags: true,
         }
     }
 }
@@ -89,9 +110,62 @@ pub fn parse_stem(stem: &str, re: &Regex) -> (String, Option<u32>) {
     (stem.trim().to_string(), None)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CacheEntry {
+    mtime: u64,
+    size: u64,
+    meta: Meta,
+}
+
+/// Remembers tag data per file (keyed by path, modified time and size) so rescans only read
+/// files that are new or changed.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct MetaCache {
+    entries: HashMap<String, CacheEntry>,
+}
+
+impl MetaCache {
+    /// Load from disk; a missing or damaged file just gives an empty cache.
+    pub fn load(path: &Path) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec(self).map_err(std::io::Error::other)?)?;
+        std::fs::rename(tmp, path)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+struct Found {
+    path: PathBuf,
+    songbook: String,
+    stem: String,
+    file_name: String,
+    ext: String,
+    mtime: u64,
+    size: u64,
+}
+
+/// Scan `root` recursively without a tag cache (tags are still read if enabled).
+pub fn scan(root: &Path, opts: &ScanOptions) -> Result<Library, String> {
+    scan_with_cache(root, opts, &mut MetaCache::default())
+}
+
 /// Scan `root` recursively. Returns an error only if the pattern is invalid
 /// or the root is not a directory.
-pub fn scan(root: &Path, opts: &ScanOptions) -> Result<Library, String> {
+pub fn scan_with_cache(root: &Path, opts: &ScanOptions, cache: &mut MetaCache) -> Result<Library, String> {
     let re = Regex::new(&opts.page_pattern).map_err(|e| format!("Bad page pattern: {e}"))?;
     if !root.is_dir() {
         return Err(format!("Not a folder: {}", root.display()));
@@ -99,6 +173,7 @@ pub fn scan(root: &Path, opts: &ScanOptions) -> Result<Library, String> {
     let exts: Vec<String> = opts.extensions.iter().map(|e| e.to_lowercase()).collect();
 
     let mut lib = Library::default();
+    let mut found: Vec<Found> = Vec::new();
     for entry in WalkDir::new(root).follow_links(true).sort_by_file_name() {
         let entry = match entry {
             Ok(e) => e,
@@ -134,25 +209,84 @@ pub fn scan(root: &Path, opts: &ScanOptions) -> Result<Library, String> {
                 .map(|c| c.as_os_str().to_string_lossy().into_owned())
                 .unwrap_or_else(|| ROOT_SONGBOOK.to_string()),
         };
-        let stem = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let (title, page) = parse_stem(&stem, &re);
+        let (mtime, size) = entry
+            .metadata()
+            .ok()
+            .map(|m| {
+                let t = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_secs());
+                (t, m.len())
+            })
+            .unwrap_or((0, 0));
+        found.push(Found {
+            path: path.to_path_buf(),
+            songbook,
+            stem: path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+            file_name: path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+            ext,
+            mtime,
+            size,
+        });
+    }
+
+    let metas = if opts.read_tags { collect_meta(&found, cache) } else { vec![Meta::default(); found.len()] };
+
+    for (f, meta) in found.into_iter().zip(metas) {
+        let (title, page) = parse_stem(&f.stem, &re);
         lib.tracks.push(Track {
             id: lib.tracks.len() as u32,
-            path: path.display().to_string(),
-            songbook,
+            path: f.path.display().to_string(),
+            songbook: f.songbook,
             title,
             page,
-            file_name: path
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            ext,
+            file_name: f.file_name,
+            ext: f.ext,
+            tag_title: meta.tag_title,
+            artist: meta.artist,
+            album: meta.album,
+            duration_secs: meta.duration_secs,
         });
     }
     Ok(lib)
+}
+
+/// Tag data for every found file, reading only what the cache does not already have,
+/// several files at a time. The cache is pruned to the files seen in this scan.
+fn collect_meta(found: &[Found], cache: &mut MetaCache) -> Vec<Meta> {
+    let key = |f: &Found| f.path.display().to_string();
+    let todo: Vec<usize> = (0..found.len())
+        .filter(|&i| {
+            let f = &found[i];
+            !matches!(cache.entries.get(&key(f)), Some(e) if e.mtime == f.mtime && e.size == f.size)
+        })
+        .collect();
+
+    if !todo.is_empty() {
+        let next = AtomicUsize::new(0);
+        let done: Mutex<Vec<(usize, Meta)>> = Mutex::new(Vec::with_capacity(todo.len()));
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8);
+        std::thread::scope(|scope| {
+            for _ in 0..threads.min(todo.len()) {
+                scope.spawn(|| loop {
+                    let n = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(&i) = todo.get(n) else { break };
+                    let m = meta::read_meta(&found[i].path);
+                    done.lock().unwrap_or_else(|e| e.into_inner()).push((i, m));
+                });
+            }
+        });
+        for (i, meta) in done.into_inner().unwrap_or_else(|e| e.into_inner()) {
+            let f = &found[i];
+            cache.entries.insert(key(f), CacheEntry { mtime: f.mtime, size: f.size, meta });
+        }
+    }
+
+    let seen: HashSet<String> = found.iter().map(key).collect();
+    cache.entries.retain(|k, _| seen.contains(k));
+    found.iter().map(|f| cache.entries.get(&key(f)).map(|e| e.meta.clone()).unwrap_or_default()).collect()
 }
 
 impl Library {
@@ -176,8 +310,9 @@ impl Library {
     /// Search by page number and/or words in the title, optionally within one songbook.
     ///
     /// * Every whitespace-separated word in `text` must match.
-    /// * A purely numeric word matches the page number exactly.
-    /// * Any other word matches as a case-insensitive substring of the title.
+    /// * A purely numeric word matches the page number exactly (or appears in the text below).
+    /// * Any other word matches as a case-insensitive substring of the title or of the tag
+    ///   title, artist or album.
     /// * An empty `text` returns everything in the songbook (or all).
     pub fn search(&self, q: &Query) -> Vec<&Track> {
         let words: Vec<String> = q
@@ -194,12 +329,16 @@ impl Library {
                 _ => true,
             })
             .filter(|t| {
-                let title = t.title.to_lowercase();
+                let mut hay = t.title.to_lowercase();
+                for extra in [&t.tag_title, &t.artist, &t.album].into_iter().flatten() {
+                    hay.push('\n');
+                    hay.push_str(&extra.to_lowercase());
+                }
                 words.iter().all(|w| {
                     if let Ok(n) = w.parse::<u32>() {
-                        t.page == Some(n) || title.contains(w.as_str())
+                        t.page == Some(n) || hay.contains(w.as_str())
                     } else {
-                        title.contains(w.as_str())
+                        hay.contains(w.as_str())
                     }
                 })
             })
@@ -317,5 +456,108 @@ mod tests {
         let opts = ScanOptions { page_pattern: "(".into(), ..Default::default() };
         let dir = tempfile::tempdir().unwrap();
         assert!(scan(dir.path(), &opts).is_err());
+    }
+
+    // ---------------------------------------------------------------- metadata
+
+    fn fixtures() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+    }
+
+    #[test]
+    fn reads_tags_from_every_format() {
+        for ext in ["mp3", "flac", "ogg", "m4a", "wma"] {
+            let m = meta::read_meta(&fixtures().join(format!("tagged.{ext}")));
+            assert_eq!(m.tag_title.as_deref(), Some(format!("Tag Title {ext}").as_str()), "{ext} title");
+            assert_eq!(m.artist.as_deref(), Some("Tag Artist"), "{ext} artist");
+            assert_eq!(m.album.as_deref(), Some("Tag Album"), "{ext} album");
+            let d = m.duration_secs.unwrap_or(0.0);
+            assert!((1.2..1.9).contains(&d), "{ext} duration {d}");
+        }
+    }
+
+    #[test]
+    fn untagged_and_unreadable_files_give_empty_meta() {
+        let m = meta::read_meta(&fixtures().join("untagged.mp3"));
+        assert_eq!((m.tag_title, m.artist, m.album), (None, None, None));
+        assert!(m.duration_secs.unwrap_or(0.0) > 0.5);
+
+        let dir = tempfile::tempdir().unwrap();
+        let junk = dir.path().join("junk.mp3");
+        fs::write(&junk, b"definitely not audio").unwrap();
+        assert_eq!(meta::read_meta(&junk), Meta::default());
+        let junk_wma = dir.path().join("junk.wma");
+        fs::write(&junk_wma, [0x30u8, 0x26, 0xB2, 0x75, 0, 0, 0]).unwrap(); // truncated ASF header
+        assert_eq!(meta::read_meta(&junk_wma), Meta::default());
+        assert_eq!(meta::read_meta(&dir.path().join("missing.mp3")), Meta::default());
+    }
+
+    fn library_with_fixtures() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let book = dir.path().join("Hymnal");
+        fs::create_dir_all(&book).unwrap();
+        fs::copy(fixtures().join("tagged.mp3"), book.join("Amazing Grace 123.mp3")).unwrap();
+        fs::copy(fixtures().join("tagged.wma"), book.join("Holy Holy 77.wma")).unwrap();
+        fs::copy(fixtures().join("untagged.mp3"), book.join("Plain Song 5.mp3")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn scan_fills_tag_fields_and_search_uses_them() {
+        let dir = library_with_fixtures();
+        let lib = scan(dir.path(), &ScanOptions::default()).unwrap();
+        let t = lib.tracks.iter().find(|t| t.page == Some(123)).unwrap();
+        assert_eq!(t.file_name, "Amazing Grace 123.mp3");
+        assert_eq!(t.title, "Amazing Grace");
+        assert_eq!(t.tag_title.as_deref(), Some("Tag Title mp3"));
+        assert_eq!(t.artist.as_deref(), Some("Tag Artist"));
+        let plain = lib.tracks.iter().find(|t| t.page == Some(5)).unwrap();
+        assert!(plain.artist.is_none() && plain.duration_secs.is_some());
+
+        let q = |text: &str| Query { text: text.into(), songbook: None, limit: None };
+        assert_eq!(lib.search(&q("artist")).len(), 2, "tagged files match on artist");
+        assert_eq!(lib.search(&q("tag album")).len(), 2);
+        assert_eq!(lib.search(&q("title wma")).len(), 1, "tag title is searchable");
+        assert_eq!(lib.search(&q("plain")).len(), 1, "file-name search still works");
+        assert_eq!(lib.search(&q("artist 123")).len(), 1, "page and tag words combine");
+
+        let off = scan(dir.path(), &ScanOptions { read_tags: false, ..Default::default() }).unwrap();
+        assert!(off.tracks.iter().all(|t| t.artist.is_none() && t.duration_secs.is_none()));
+    }
+
+    #[test]
+    fn cache_skips_unchanged_files_and_prunes_deleted_ones() {
+        let dir = library_with_fixtures();
+        let opts = ScanOptions::default();
+        let mut cache = MetaCache::default();
+        scan_with_cache(dir.path(), &opts, &mut cache).unwrap();
+        assert_eq!(cache.len(), 3);
+
+        // Poison one cached entry: an unchanged file must keep the cached value...
+        let key = dir.path().join("Hymnal").join("Plain Song 5.mp3").display().to_string();
+        cache.entries.get_mut(&key).unwrap().meta.artist = Some("FROM CACHE".into());
+        let lib = scan_with_cache(dir.path(), &opts, &mut cache).unwrap();
+        assert_eq!(
+            lib.tracks.iter().find(|t| t.page == Some(5)).unwrap().artist.as_deref(),
+            Some("FROM CACHE")
+        );
+
+        // ...but a changed file (new size) is read again.
+        let p = dir.path().join("Hymnal").join("Plain Song 5.mp3");
+        let mut bytes = fs::read(&p).unwrap();
+        bytes.extend_from_slice(&[0; 16]);
+        fs::write(&p, bytes).unwrap();
+        let lib = scan_with_cache(dir.path(), &opts, &mut cache).unwrap();
+        assert!(lib.tracks.iter().find(|t| t.page == Some(5)).unwrap().artist.is_none());
+
+        // Persisting and reloading keeps the entries; deleting a file prunes it.
+        let file = dir.path().join("cache.json");
+        cache.save(&file).unwrap();
+        let mut reloaded = MetaCache::load(&file);
+        assert_eq!(reloaded.len(), 3);
+        fs::remove_file(dir.path().join("Hymnal").join("Holy Holy 77.wma")).unwrap();
+        scan_with_cache(dir.path(), &opts, &mut reloaded).unwrap();
+        assert_eq!(reloaded.len(), 2);
+        assert!(MetaCache::load(&dir.path().join("nope.json")).is_empty());
     }
 }

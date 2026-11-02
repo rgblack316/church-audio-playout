@@ -19,6 +19,11 @@ Windows church-service music playout app (Tauri 2 + Rust).
   at start-up so they fire instantly. A favorite whose file is missing shows the song title and
   the error in red; it is retried after a rescan. Songs can be put on any pad or favorite by
   double-click (selected pad), Enter in search (top result), or by dragging a row onto it.
+- Phase 5b (done): the file browser shows the full file name (with extension) and, when the files
+  have them, title / artist / album / length from their tags (ID3, Vorbis, MP4, FLAC and WMA).
+  Tag columns appear only when a result has that tag, and tags are searchable. Tag data is cached
+  (path + modified time + size) so rescans only read new or changed files; it can be turned off in
+  Settings. WMA decoding on Windows now reports exactly which Media Foundation step failed.
 - Next: keyboard shortcuts, polish.
 
 ## Using it

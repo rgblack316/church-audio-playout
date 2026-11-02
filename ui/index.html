@@ -30,8 +30,11 @@
   th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); }
   th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 600; }
   tr.row:hover { background: #232b42; }
-  td.page { width: 80px; color: var(--accent); font-variant-numeric: tabular-nums; }
-  td.fmt { width: 80px; color: var(--muted); text-transform: uppercase; }
+  td.page { width: 70px; color: var(--accent); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.fmt { width: 70px; color: var(--muted); text-transform: uppercase; white-space: nowrap; }
+  td.len { width: 70px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.name { overflow-wrap: anywhere; }            /* show the whole file name, wrapping if it is long */
+  td.tag { color: var(--muted); overflow-wrap: anywhere; }
   .empty { padding: 24px; color: var(--muted); }
   footer { padding: 8px 16px; color: var(--muted); border-top: 1px solid var(--line);
            background: var(--panel); display: flex; gap: 16px; align-items: center; }
@@ -74,7 +77,8 @@
   .pad.selected { border-color: var(--accent); }
   .pad.playing { background: #1d3326; border-color: #4fbf7a; }
   .pad .num { color: var(--muted); font-size: 12px; }
-  .pad .label { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 1.4em; }
+  .pad .label { font-weight: 600; line-height: 1.3; min-height: 2.6em; overflow: hidden; overflow-wrap: anywhere;
+                display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
   .pad .sub { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 1.2em; }
   .pad .time { font-size: 34px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .pad.low .time { color: var(--bad); }
@@ -145,6 +149,11 @@
      Leave blank to restore the default (page = trailing number in the file name).</p>
   <input type="text" id="pattern" spellcheck="false">
   <div class="err" id="patternErr"></div>
+  <hr style="border-color: var(--line)">
+  <label><input type="checkbox" id="readTags"> Read ID3 / other tags (title, artist, album, length) when scanning</label>
+  <p class="small">The first scan of a large library takes longer; results are remembered, so later scans only
+     read new or changed files.</p>
+  <div class="err" id="tagsErr"></div>
   <p><strong>Files without a page number</strong> <span class="small" id="nopageCount"></span></p>
   <ul class="files" id="nopage"></ul>
   <p><strong>Folders or files that could not be read</strong> <span class="small" id="badCount"></span></p>
@@ -179,6 +188,7 @@ function applySummary(s) {
   fillList('bad', s.unreadable.map((p) => `${p.path} — ${p.reason}`));
   $('nopageCount').textContent = `(${missing})`;
   $('badCount').textContent = `(${bad})`;
+  $('readTags').checked = s.read_tags;
   return s;
 }
 
@@ -192,6 +202,11 @@ function fillList(id, items) {
   }
 }
 
+function fmtLength(sec) {
+  const whole = Math.round(sec);
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`;
+}
+
 function renderResults(tracks, haveFolder) {
   const box = $('results');
   if (!haveFolder) {
@@ -202,11 +217,24 @@ function renderResults(tracks, haveFolder) {
     box.innerHTML = '<div class="empty">No matching songs.</div>';
     return;
   }
+  // Tag columns only appear when at least one result has that tag.
+  const has = (f) => tracks.some((t) => f(t));
+  const columns = [
+    { head: 'Page', cls: 'page', get: (t) => t.page ?? '\u2014', show: true },
+    { head: 'File name', cls: 'name', get: (t) => t.file_name, show: true },
+    { head: 'Title (tag)', cls: 'tag', get: (t) => t.tag_title ?? '', show: has((t) => t.tag_title) },
+    { head: 'Artist', cls: 'tag', get: (t) => t.artist ?? '', show: has((t) => t.artist) },
+    { head: 'Album', cls: 'tag', get: (t) => t.album ?? '', show: has((t) => t.album) },
+    { head: 'Length', cls: 'len', get: (t) => (t.duration_secs ? fmtLength(t.duration_secs) : ''), show: has((t) => t.duration_secs) },
+    { head: 'Songbook', cls: '', get: (t) => t.songbook, show: true },
+    { head: 'Type', cls: 'fmt', get: (t) => t.ext, show: true },
+  ].filter((c) => c.show);
+
   const table = document.createElement('table');
   const head = table.createTHead().insertRow();
-  for (const h of ['Page', 'Title', 'Songbook', 'Type']) {
+  for (const c of columns) {
     const th = document.createElement('th');
-    th.textContent = h;
+    th.textContent = c.head;
     head.append(th);
   }
   const body = table.createTBody();
@@ -215,14 +243,12 @@ function renderResults(tracks, haveFolder) {
     tr.className = 'row';
     tr.title = t.path;
     tr.dataset.id = t.id;
+    tr.dataset.name = t.file_name;
     if (t === tracks[0] && $('q').value.trim()) tr.classList.add('first');
-    const cells = [
-      [t.page ?? '—', 'page'], [t.title, ''], [t.songbook, ''], [t.ext, 'fmt'],
-    ];
-    for (const [text, cls] of cells) {
+    for (const c of columns) {
       const td = tr.insertCell();
-      td.textContent = text;
-      if (cls) td.className = cls;
+      td.textContent = c.get(t);
+      if (c.cls) td.className = c.cls;
     }
   }
   box.replaceChildren(table);
@@ -286,6 +312,17 @@ $('settings').addEventListener('click', async () => {
   $('pattern').value = await invoke('get_page_pattern');
   $('patternErr').textContent = '';
   $('dlg').showModal();
+});
+$('readTags').addEventListener('change', async () => {
+  $('tagsErr').textContent = '';
+  const wanted = $('readTags').checked;
+  setStatus('Scanning\u2026');
+  try {
+    await afterScan(await invoke('set_read_tags', { enabled: wanted }));
+  } catch (e) {
+    $('readTags').checked = !wanted;
+    $('tagsErr').textContent = String(e);
+  }
 });
 $('closeDlg').addEventListener('click', () => $('dlg').close());
 $('applyPattern').addEventListener('click', async () => {
@@ -384,7 +421,7 @@ function paintPad(el, p) {
   const remaining = Math.max(0, p.duration_secs - p.position_secs);
   el.classList.toggle('playing', p.playing);
   el.classList.toggle('low', p.playing && remaining <= 10);
-  el.title = p.error || '';
+  el.title = p.error || (p.loaded ? `${p.label}\n${p.sub}` : '');
   el.querySelector('.label').textContent =
     p.loading ? 'Loading…' : (p.loaded || p.error) ? p.label : 'Empty';
   const sub = el.querySelector('.sub');
@@ -476,7 +513,7 @@ $('results').addEventListener('pointerdown', (ev) => {
   if (ev.button !== 0) return;
   const tr = ev.target.closest('tr.row');
   if (!tr) return;
-  drag = { id: Number(tr.dataset.id), title: tr.children[1].textContent,
+  drag = { id: Number(tr.dataset.id), title: tr.dataset.name,
            x: ev.clientX, y: ev.clientY, active: false, ghost: null, over: null };
 });
 

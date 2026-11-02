@@ -65,6 +65,19 @@ pub(crate) fn check_length(d: Decoded) -> Result<Decoded, String> {
     Ok(d)
 }
 
+/// Convert little-endian integer PCM of a common depth (8/16/24/32 bit) to 16-bit samples.
+#[cfg_attr(not(feature = "mf"), allow(dead_code))]
+pub(crate) fn pcm_bytes_to_i16(bytes: &[u8], bits: u32, out: &mut Vec<i16>) -> Result<(), String> {
+    match bits {
+        8 => out.extend(bytes.iter().map(|b| ((*b as i16) - 128) << 8)), // 8-bit PCM is unsigned
+        16 => out.extend(bytes.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]))),
+        24 => out.extend(bytes.chunks_exact(3).map(|b| i16::from_le_bytes([b[1], b[2]]))),
+        32 => out.extend(bytes.chunks_exact(4).map(|b| i16::from_le_bytes([b[2], b[3]]))),
+        other => return Err(format!("unsupported PCM bit depth: {other}")),
+    }
+    Ok(())
+}
+
 /// Keep the first two channels of interleaved multichannel audio.
 pub(crate) fn push_stereo(out: &mut Vec<i16>, interleaved: &[i16], channels: usize) {
     match channels {
