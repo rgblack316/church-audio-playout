@@ -9,7 +9,7 @@ description = "Audio decoding and multi-pad mixing for the church playout app"
 mf = ["dep:windows"]
 
 [dependencies]
-cpal = "0.15"
+cpal = "0.16"
 serde = { version = "1", features = ["derive"] }
 symphonia = { version = "0.5", features = ["all"] }
 windows = { version = "0.58", optional = true, features = [
