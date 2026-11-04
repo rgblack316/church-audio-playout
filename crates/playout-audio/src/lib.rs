@@ -26,6 +26,8 @@ pub struct AudioStatus {
     pub device: String,
     pub sample_rate: u32,
     pub error: Option<String>,
+    /// Set when the chosen output device was not found and the system default is used instead.
+    pub missing_device: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -49,6 +51,17 @@ pub struct Snapshot {
     pub favs: Vec<PadInfo>,
 }
 
+/// Names of the available audio output devices (for a device picker).
+pub fn list_output_devices() -> Vec<String> {
+    let mut names: Vec<String> = cpal::default_host()
+        .output_devices()
+        .map(|it| it.filter_map(|d| d.name().ok()).collect())
+        .unwrap_or_default();
+    names.sort_by_key(|n| n.to_lowercase());
+    names.dedup();
+    names
+}
+
 enum Ctl {
     Restart,
     Shutdown,
@@ -58,6 +71,8 @@ pub struct Engine {
     mixer: Arc<Mutex<Mixer>>,
     status: Arc<Mutex<AudioStatus>>,
     ctl: Mutex<Sender<Ctl>>,
+    /// Chosen output device name; None means the system default.
+    device: Arc<Mutex<Option<String>>>,
 }
 
 impl Engine {
@@ -71,17 +86,19 @@ impl Engine {
             ..Default::default()
         }));
         let (tx, rx) = channel::<Ctl>();
+        let device: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         {
+            let device = device.clone();
             let mixer = mixer.clone();
             let status = status.clone();
             // The cpal stream is not Send on every platform, so one thread owns it.
             let _ = std::thread::Builder::new().name("audio".into()).spawn(move || {
-                let mut stream = open(&mixer, &status);
+                let mut stream = open(&mixer, &status, &device);
                 loop {
                     match rx.recv() {
                         Ok(Ctl::Restart) => {
                             drop(stream.take());
-                            stream = open(&mixer, &status);
+                            stream = open(&mixer, &status, &device);
                         }
                         Ok(Ctl::Shutdown) | Err(_) => break,
                     }
@@ -89,7 +106,7 @@ impl Engine {
                 drop(stream);
             });
         }
-        Engine { mixer, status, ctl: Mutex::new(tx) }
+        Engine { mixer, status, ctl: Mutex::new(tx), device }
     }
 
     /// Re-open the default output device (e.g. after plugging in a USB interface).
@@ -104,6 +121,13 @@ impl Engine {
         lock(&self.status).error = Some("Audio is restarting…".into());
         lock(&self.status).ok = false;
         let _ = lock(&self.ctl).send(Ctl::Restart);
+    }
+
+    /// Choose the output device by name (None = system default) and re-open the stream.
+    /// Anything playing is stopped.
+    pub fn set_device(&self, name: Option<String>) {
+        *lock(&self.device) = name.filter(|n| !n.trim().is_empty());
+        self.restart_audio();
     }
 
     pub fn set_overlap(&self, overlap: bool) {
@@ -284,8 +308,13 @@ impl Drop for Engine {
     }
 }
 
-fn open(mixer: &Arc<Mutex<Mixer>>, status: &Arc<Mutex<AudioStatus>>) -> Option<cpal::Stream> {
-    match try_open(mixer, status) {
+fn open(
+    mixer: &Arc<Mutex<Mixer>>,
+    status: &Arc<Mutex<AudioStatus>>,
+    device: &Arc<Mutex<Option<String>>>,
+) -> Option<cpal::Stream> {
+    let wanted = lock(device).clone();
+    match try_open(mixer, status, wanted.as_deref()) {
         Ok((stream, st)) => {
             *lock(status) = st;
             Some(stream)
@@ -300,11 +329,26 @@ fn open(mixer: &Arc<Mutex<Mixer>>, status: &Arc<Mutex<AudioStatus>>) -> Option<c
 fn try_open(
     mixer: &Arc<Mutex<Mixer>>,
     status: &Arc<Mutex<AudioStatus>>,
+    wanted: Option<&str>,
 ) -> Result<(cpal::Stream, AudioStatus), String> {
     let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .ok_or_else(|| "No audio output device found".to_string())?;
+    let mut missing_device = None;
+    let chosen = wanted.and_then(|w| {
+        let found = host
+            .output_devices()
+            .ok()?
+            .find(|d| d.name().map(|n| n == w).unwrap_or(false));
+        if found.is_none() {
+            missing_device = Some(w.to_string());
+        }
+        found
+    });
+    let device = match chosen {
+        Some(d) => d,
+        None => host
+            .default_output_device()
+            .ok_or_else(|| "No audio output device found".to_string())?,
+    };
     let supported = device
         .default_output_config()
         .map_err(|e| format!("Could not read the audio device format: {e}"))?;
@@ -323,7 +367,13 @@ fn try_open(
 
     Ok((
         stream,
-        AudioStatus { ok: true, device: name, sample_rate: config.sample_rate.0, error: None },
+        AudioStatus {
+            ok: true,
+            device: name,
+            sample_rate: config.sample_rate.0,
+            error: None,
+            missing_device,
+        },
     ))
 }
 

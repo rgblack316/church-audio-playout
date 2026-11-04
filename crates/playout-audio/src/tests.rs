@@ -191,3 +191,24 @@ fn pcm_depth_conversion() {
     assert_eq!(conv(&[128, 255, 0], 8).unwrap(), vec![0, 127 << 8, -128 << 8]);
     assert!(conv(&[0; 4], 12).is_err());
 }
+
+#[test]
+fn unknown_output_device_falls_back_instead_of_failing() {
+    let e = Engine::new(1, 1);
+    e.set_device(Some("No Such Device 12345".into()));
+    // Give the audio thread a moment; on machines without audio it reports an error instead.
+    let mut snap = e.snapshot();
+    for _ in 0..50 {
+        snap = e.snapshot();
+        if snap.audio.ok || snap.audio.error.as_deref().is_some_and(|m| !m.contains("restarting")) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(40));
+    }
+    if snap.audio.ok {
+        assert_eq!(snap.audio.missing_device.as_deref(), Some("No Such Device 12345"));
+    } else {
+        assert!(snap.audio.error.is_some());
+    }
+    e.set_device(None);
+}

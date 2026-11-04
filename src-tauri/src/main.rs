@@ -37,6 +37,9 @@ struct Settings {
     /// Read ID3 / other tags (artist, album, length) when scanning.
     #[serde(default = "default_overlap")]
     read_tags: bool,
+    /// Chosen audio output device (None = the Windows default).
+    #[serde(default)]
+    audio_device: Option<String>,
     /// Favorite songs by slot (row * 8 + column).
     #[serde(default)]
     favorites: Vec<Option<Favorite>>,
@@ -77,6 +80,7 @@ impl Default for Settings {
             overlap: true,
             fav_rows: DEFAULT_FAV_ROWS,
             read_tags: true,
+            audio_device: None,
             favorites: vec![None; FAV_SLOTS],
         }
     }
@@ -391,6 +395,42 @@ fn clear_pad(
     Ok(())
 }
 
+#[derive(Serialize)]
+struct AudioDevices {
+    devices: Vec<String>,
+    /// The saved choice (None = system default).
+    selected: Option<String>,
+}
+
+#[tauri::command(async)]
+fn list_audio_devices(app: AppHandle, shared: State<'_, Shared>) -> AudioDevices {
+    let mut state = shared.lock().unwrap();
+    ensure_init(&app, &mut state);
+    AudioDevices {
+        devices: playout_audio::list_output_devices(),
+        selected: state.settings.audio_device.clone(),
+    }
+}
+
+/// Switch the output device (None = system default). Stops anything playing.
+#[tauri::command(async)]
+fn set_audio_device(
+    app: AppHandle,
+    shared: State<'_, Shared>,
+    engine: State<'_, Engine>,
+    name: Option<String>,
+) -> Result<(), String> {
+    let name = name.filter(|n| !n.trim().is_empty());
+    {
+        let mut state = shared.lock().unwrap();
+        ensure_init(&app, &mut state);
+        state.settings.audio_device = name.clone();
+        save_settings(&app, &state.settings)?;
+    }
+    engine.set_device(name);
+    Ok(())
+}
+
 #[tauri::command]
 fn restart_audio(engine: State<'_, Engine>) {
     engine.restart_audio()
@@ -484,6 +524,9 @@ fn get_layout(app: AppHandle, shared: State<'_, Shared>, engine: State<'_, Engin
     ensure_init(&app, &mut state);
     let l = layout_of(&state.settings);
     let _ = apply_layout(&engine, &l);
+    if state.settings.audio_device.is_some() {
+        engine.set_device(state.settings.audio_device.clone());
+    }
     l
 }
 
@@ -549,6 +592,8 @@ fn main() {
             stop_all,
             clear_pad,
             restart_audio,
+            list_audio_devices,
+            set_audio_device,
             reload_favorites,
             get_layout,
             set_layout

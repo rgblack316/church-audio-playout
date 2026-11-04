@@ -161,6 +161,16 @@
     <button id="applyLayout">Apply layout</button>
   </div>
   <hr style="border-color: var(--line)">
+  <div class="row">
+    <label><strong>Audio output</strong>
+      <select id="audioDevice"></select>
+    </label>
+    <button id="refreshDevices" title="Look for newly connected devices">Refresh</button>
+  </div>
+  <p class="small">Switching the output stops anything that is playing. If the chosen device is unplugged,
+     the Windows default is used until it returns (press Retry audio).</p>
+  <div class="err" id="deviceErr"></div>
+  <hr style="border-color: var(--line)">
   <label for="pattern"><strong>Page number pattern</strong></label>
   <p class="small">Regular expression with named groups <code>title</code> and <code>page</code>.
      Leave blank to restore the default (page = trailing number in the file name).</p>
@@ -327,10 +337,30 @@ $('settings').addEventListener('click', async () => {
   $('overlap').checked = layout.overlap;
   updatePadTotal();
   $('layoutErr').textContent = '';
+  loadDevices();
   $('pattern').value = await invoke('get_page_pattern');
   $('patternErr').textContent = '';
   $('dlg').showModal();
 });
+async function loadDevices() {
+  const sel = $('audioDevice');
+  $('deviceErr').textContent = '';
+  try {
+    const r = await invoke('list_audio_devices');
+    sel.replaceChildren(new Option('System default', ''));
+    for (const d of r.devices) sel.add(new Option(d, d));
+    if (r.selected && !r.devices.includes(r.selected)) sel.add(new Option(`${r.selected} (not connected)`, r.selected));
+    sel.value = r.selected || '';
+  } catch (e) { $('deviceErr').textContent = String(e); }
+}
+$('audioDevice').addEventListener('change', async () => {
+  $('deviceErr').textContent = '';
+  try {
+    await invoke('set_audio_device', { name: $('audioDevice').value || null });
+    await pollPads();
+  } catch (e) { $('deviceErr').textContent = String(e); }
+});
+$('refreshDevices').addEventListener('click', loadDevices);
 $('readTags').addEventListener('change', async () => {
   $('tagsErr').textContent = '';
   const wanted = $('readTags').checked;
@@ -461,7 +491,10 @@ function renderSnapshot(s) {
 
   $('audioBanner').style.display = s.audio.ok ? 'none' : 'flex';
   if (!s.audio.ok) $('audioMsg').textContent = s.audio.error || 'Audio output is not available';
-  $('device').textContent = s.audio.ok ? `Output: ${s.audio.device} (${s.audio.sample_rate} Hz)` : '';
+  $('device').textContent = s.audio.ok
+    ? `Output: ${s.audio.device} (${s.audio.sample_rate} Hz)` +
+      (s.audio.missing_device ? ` \u2014 "${s.audio.missing_device}" not found, using default` : '')
+    : '';
 
   s.pads.forEach((p, i) => paintPad(mainEls[i], p));
   favEls.forEach((el, slot) => { if (s.favs[slot]) paintPad(el, s.favs[slot]); });
