@@ -108,11 +108,14 @@ fn probe_devices() -> Vec<Probe> {
                 Err(e) => note = format!("output formats unavailable: {e}"),
             }
             // Some devices only answer for their default format; count those as outputs too.
-            if channels == 0 {
-                if let Ok(c) = d.default_output_config() {
-                    channels = c.channels();
-                    note.push_str("; default format ok");
+            match d.default_output_config() {
+                Ok(c) => {
+                    note.push_str(&format!("; default format {} ch, {} Hz, {:?}", c.channels(), c.sample_rate().0, c.sample_format()));
+                    if channels == 0 {
+                        channels = c.channels();
+                    }
                 }
+                Err(e) => note.push_str(&format!("; default format failed: {e}")),
             }
             Probe { name, channels, note }
         })
