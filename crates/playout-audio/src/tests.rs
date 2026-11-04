@@ -63,7 +63,7 @@ fn mixer_plays_to_end_then_rewinds() {
     m.pads[0].decoded = Some(decoded(100, 1, vec![16384; 4]));
     m.pads[0].playing = true;
     let mut buf = vec![0.0f32; 8 * 2]; // 8 stereo frames
-    m.render(2, 100.0, &mut buf);
+    m.render(2, 0, 100.0, &mut buf);
     // first 4 frames carry audio (0.5), the rest are silence
     for f in 0..4 {
         assert!((buf[f * 2] - 0.5).abs() < 1e-4 && (buf[f * 2 + 1] - 0.5).abs() < 1e-4, "frame {f}");
@@ -83,7 +83,7 @@ fn mixer_sums_pads_clamps_and_resamples() {
     m.pads[0].playing = true;
     m.pads[1].playing = true;
     let mut buf = vec![0.0f32; 4 * 2];
-    m.render(2, 100.0, &mut buf);
+    m.render(2, 0, 100.0, &mut buf);
     assert!(buf.iter().all(|v| *v == 1.0), "two loud pads must clamp, got {buf:?}");
 
     // 50 Hz source into a 100 Hz output: position advances at half speed.
@@ -91,7 +91,7 @@ fn mixer_sums_pads_clamps_and_resamples() {
     m.pads[0].decoded = Some(decoded(50, 1, vec![0, 20000, 0, 0, 0, 0, 0, 0]));
     m.pads[0].playing = true;
     let mut buf = vec![0.0f32; 4];
-    m.render(1, 100.0, &mut buf);
+    m.render(1, 0, 100.0, &mut buf);
     assert!((m.pads[0].pos - 2.0).abs() < 1e-9);
     // frame 1 is halfway between samples 0 and 1 (linear interpolation)
     assert!((buf[1] - (10000.0 / 32768.0)).abs() < 1e-4, "{buf:?}");
@@ -224,12 +224,47 @@ fn linux_device_names_become_readable_labels() {
     assert_eq!(alsa_label("null"), None);
     let names: Vec<String> = ["hw:CARD=PCH,DEV=0", "default", "pulse", "pipewire", "sysdefault:CARD=USB_Mixer", "front:CARD=PCH,DEV=0"]
         .iter().map(|s| s.to_string()).collect();
-    let list = label_devices(names.clone(), None, true);
+    let found: Vec<(String, u16)> = names.iter().map(|n| (n.clone(), 2)).collect();
+    let list = label_devices(found.clone(), None, true);
     let labels: Vec<&str> = list.iter().map(|d| d.label.as_str()).collect();
     assert_eq!(labels, ["PipeWire (system mixer)", "PulseAudio (system mixer)", "System default (ALSA)", "USB Mixer"]);
     // A saved technical name stays selectable; other platforms are left untouched.
-    assert!(label_devices(names.clone(), Some("hw:CARD=PCH,DEV=0"), true).iter().any(|d| d.name == "hw:CARD=PCH,DEV=0"));
-    assert_eq!(label_devices(vec!["Speakers".into(), "Headphones".into()], None, false)[0].label, "Headphones");
+    assert!(label_devices(found.clone(), Some("hw:CARD=PCH,DEV=0"), true).iter().any(|d| d.name == "hw:CARD=PCH,DEV=0"));
+    assert_eq!(label_devices(vec![("Speakers".into(), 2), ("Headphones".into(), 2)], None, false)[0].label, "Headphones");
     // Nothing recognisable: show everything rather than an empty list.
-    assert_eq!(label_devices(vec!["hw:CARD=X,DEV=0".into()], None, true).len(), 1);
+    assert_eq!(label_devices(vec![("hw:CARD=X,DEV=0".into(), 2)], None, true).len(), 1);
+}
+
+#[test]
+fn stereo_can_be_routed_to_a_later_channel_pair() {
+    let mut m = Mixer::new(1, 0);
+    m.pads[0].decoded = Some(decoded(100, 2, vec![16384; 40]));
+    m.pads[0].playing = true;
+    let mut buf = vec![0.0f32; 4 * 6]; // 6-channel device, 4 frames
+    m.render(6, 2, 100.0, &mut buf); // channels 3-4
+    for frame in buf.chunks(6) {
+        assert_eq!(frame[0], 0.0);
+        assert_eq!(frame[1], 0.0);
+        assert!(frame[2] > 0.4 && frame[3] > 0.4);
+        assert_eq!(frame[4], 0.0);
+    }
+}
+
+#[test]
+fn multichannel_devices_get_one_entry_per_stereo_pair() {
+    use crate::{label_devices, parse_choice};
+    let list = label_devices(vec![("RODECaster Duo".into(), 6), ("Speakers".into(), 2)], None, false);
+    let got: Vec<(&str, &str)> = list.iter().map(|d| (d.name.as_str(), d.label.as_str())).collect();
+    assert_eq!(
+        got,
+        [
+            ("RODECaster Duo", "RODECaster Duo \u{2014} outputs 1\u{2013}2"),
+            ("RODECaster Duo@@3", "RODECaster Duo \u{2014} outputs 3\u{2013}4"),
+            ("RODECaster Duo@@5", "RODECaster Duo \u{2014} outputs 5\u{2013}6"),
+            ("Speakers", "Speakers"),
+        ]
+    );
+    assert_eq!(parse_choice("RODECaster Duo@@3"), ("RODECaster Duo", 2));
+    assert_eq!(parse_choice("Speakers"), ("Speakers", 0));
+    assert_eq!(parse_choice("Odd@@name"), ("Odd@@name", 0));
 }

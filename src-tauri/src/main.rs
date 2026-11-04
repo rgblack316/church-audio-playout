@@ -412,6 +412,12 @@ fn list_audio_devices(app: AppHandle, shared: State<'_, Shared>) -> AudioDevices
     }
 }
 
+/// Text listing every device the system reports (for troubleshooting a missing output).
+#[tauri::command(async)]
+fn get_audio_diagnostics() -> String {
+    playout_audio::describe_devices()
+}
+
 /// Switch the output device (None = system default). Stops anything playing.
 #[tauri::command(async)]
 fn set_audio_device(
@@ -594,6 +600,7 @@ fn main() {
             restart_audio,
             list_audio_devices,
             set_audio_device,
+            get_audio_diagnostics,
             reload_favorites,
             get_layout,
             set_layout

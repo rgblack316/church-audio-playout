@@ -83,23 +83,98 @@ pub fn alsa_label(name: &str) -> Option<String> {
     }
 }
 
-/// Available audio output devices, easiest-to-choose first. On Linux the long list of
-/// technical ALSA names is reduced to readable choices; `keep` (the saved choice) is
-/// always included if it exists.
-pub fn list_output_devices(keep: Option<&str>) -> Vec<DeviceEntry> {
-    let names: Vec<String> = cpal::default_host()
-        .output_devices()
-        .map(|it| it.filter_map(|d| d.name().ok()).collect())
-        .unwrap_or_default();
-    label_devices(names, keep, cfg!(target_os = "linux"))
+/// What we learned about one audio device from the system.
+struct Probe {
+    name: String,
+    /// Most output channels it offers (0 = not an output device).
+    channels: u16,
+    note: String,
 }
 
-fn label_devices(mut names: Vec<String>, keep: Option<&str>, alsa: bool) -> Vec<DeviceEntry> {
-    names.sort();
-    names.dedup();
+fn probe_devices() -> Vec<Probe> {
+    let host = cpal::default_host();
+    let Ok(devices) = host.devices() else { return Vec::new() };
+    devices
+        .map(|d| {
+            let name = d.name().unwrap_or_else(|e| format!("(unnamed device: {e})"));
+            let mut channels = 0u16;
+            let mut note;
+            match d.supported_output_configs() {
+                Ok(it) => {
+                    let all: Vec<_> = it.collect();
+                    channels = all.iter().map(|c| c.channels()).max().unwrap_or(0);
+                    note = format!("{} output formats", all.len());
+                }
+                Err(e) => note = format!("output formats unavailable: {e}"),
+            }
+            // Some devices only answer for their default format; count those as outputs too.
+            if channels == 0 {
+                if let Ok(c) = d.default_output_config() {
+                    channels = c.channels();
+                    note.push_str("; default format ok");
+                }
+            }
+            Probe { name, channels, note }
+        })
+        .collect()
+}
+
+/// Plain-text report of every device the system lists, for troubleshooting a missing output.
+pub fn describe_devices() -> String {
+    let host = cpal::default_host();
+    let default = host.default_output_device().and_then(|d| d.name().ok()).unwrap_or_else(|| "none".into());
+    let mut out = format!("Audio host: {:?}\nSystem default output: {default}\n\n", host.id());
+    for p in probe_devices() {
+        let kind = if p.channels > 0 { format!("OUTPUT, up to {} channels", p.channels) } else { "no output".into() };
+        out.push_str(&format!("{} \u{2014} {kind} ({})\n", p.name, p.note));
+    }
+    out
+}
+
+/// Split a saved device choice into (device name, first output channel, 0-based).
+/// "Name" means channels 1-2; "Name@@3" means channels 3-4.
+fn parse_choice(choice: &str) -> (&str, usize) {
+    match choice.rsplit_once("@@") {
+        Some((name, ch)) => match ch.parse::<usize>() {
+            Ok(first) if first >= 1 => (name, first - 1),
+            _ => (choice, 0),
+        },
+        None => (choice, 0),
+    }
+}
+
+/// Available audio output devices, easiest-to-choose first. Devices with more than two
+/// outputs (mixers, multitrack interfaces) get one entry per stereo pair. On Linux the long
+/// list of technical ALSA names is reduced to readable choices; `keep` (the saved choice) is
+/// always included if it exists.
+pub fn list_output_devices(keep: Option<&str>) -> Vec<DeviceEntry> {
+    let found: Vec<(String, u16)> =
+        probe_devices().into_iter().filter(|p| p.channels > 0).map(|p| (p.name, p.channels)).collect();
+    label_devices(found, keep, cfg!(target_os = "linux"))
+}
+
+fn label_devices(mut found: Vec<(String, u16)>, keep: Option<&str>, alsa: bool) -> Vec<DeviceEntry> {
+    found.sort();
+    found.dedup_by(|a, b| a.0 == b.0);
+    let names: Vec<String> = found.iter().map(|f| f.0.clone()).collect();
     let plain = |n: &String| DeviceEntry { name: n.clone(), label: n.clone() };
     if !alsa {
-        let mut v: Vec<DeviceEntry> = names.iter().map(plain).collect();
+        let mut v = Vec::new();
+        for (name, ch) in &found {
+            if *ch <= 2 {
+                v.push(plain(name));
+                continue;
+            }
+            let mut first = 1u16;
+            while first < *ch {
+                let entry_name = if first == 1 { name.clone() } else { format!("{name}@@{first}") };
+                v.push(DeviceEntry {
+                    name: entry_name,
+                    label: format!("{name} \u{2014} outputs {first}\u{2013}{}", first + 1),
+                });
+                first += 2;
+            }
+        }
         v.sort_by_key(|d| d.label.to_lowercase());
         return v;
     }
@@ -396,15 +471,23 @@ fn try_open(
 ) -> Result<(cpal::Stream, AudioStatus), String> {
     let host = cpal::default_host();
     let mut missing_device = None;
+    let mut first_channel = 0usize;
     let chosen = wanted.and_then(|w| {
+        let (name, first) = parse_choice(w);
         let found = host
-            .output_devices()
+            .devices()
             .ok()?
-            .find(|d| d.name().map(|n| n == w).unwrap_or(false));
-        if found.is_none() {
-            missing_device = Some(w.to_string());
+            .find(|d| d.name().map(|n| n == name).unwrap_or(false));
+        match found {
+            Some(d) => {
+                first_channel = first;
+                Some(d)
+            }
+            None => {
+                missing_device = Some(name.to_string());
+                None
+            }
         }
-        found
     });
     let device = match chosen {
         Some(d) => d,
@@ -412,18 +495,41 @@ fn try_open(
             .default_output_device()
             .ok_or_else(|| "No audio output device found".to_string())?,
     };
-    let supported = device
+    let default = device
         .default_output_config()
         .map_err(|e| format!("Could not read the audio device format: {e}"))?;
+    // Routing to a later channel pair needs a format with at least that many channels.
+    let needed = (first_channel + 2) as u16;
+    let supported = if default.channels() >= needed || first_channel == 0 {
+        default
+    } else {
+        let rate = default.sample_rate();
+        device
+            .supported_output_configs()
+            .map_err(|e| format!("Could not read the audio device formats: {e}"))?
+            .filter(|c| c.channels() >= needed)
+            .min_by_key(|c| c.channels())
+            .map(|c| {
+                if rate >= c.min_sample_rate() && rate <= c.max_sample_rate() {
+                    c.with_sample_rate(rate)
+                } else {
+                    c.with_max_sample_rate()
+                }
+            })
+            .ok_or_else(|| format!("That device has no outputs {}\u{2013}{}", first_channel + 1, first_channel + 2))?
+    };
     let format = supported.sample_format();
     let config: cpal::StreamConfig = supported.into();
-    let name = device.name().unwrap_or_else(|_| "Default output".into());
+    let mut name = device.name().unwrap_or_else(|_| "Default output".into());
+    if first_channel > 0 {
+        name = format!("{name} (outputs {}\u{2013}{})", first_channel + 1, first_channel + 2);
+    }
 
     let stream = match format {
-        cpal::SampleFormat::F32 => build::<f32>(&device, &config, mixer.clone(), status.clone()),
-        cpal::SampleFormat::I16 => build::<i16>(&device, &config, mixer.clone(), status.clone()),
-        cpal::SampleFormat::U16 => build::<u16>(&device, &config, mixer.clone(), status.clone()),
-        cpal::SampleFormat::I32 => build::<i32>(&device, &config, mixer.clone(), status.clone()),
+        cpal::SampleFormat::F32 => build::<f32>(&device, &config, first_channel, mixer.clone(), status.clone()),
+        cpal::SampleFormat::I16 => build::<i16>(&device, &config, first_channel, mixer.clone(), status.clone()),
+        cpal::SampleFormat::U16 => build::<u16>(&device, &config, first_channel, mixer.clone(), status.clone()),
+        cpal::SampleFormat::I32 => build::<i32>(&device, &config, first_channel, mixer.clone(), status.clone()),
         other => Err(format!("Unsupported audio sample format: {other:?}")),
     }?;
     stream.play().map_err(|e| format!("Could not start audio output: {e}"))?;
@@ -443,6 +549,7 @@ fn try_open(
 fn build<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
+    first_channel: usize,
     mixer: Arc<Mutex<Mixer>>,
     status: Arc<Mutex<AudioStatus>>,
 ) -> Result<cpal::Stream, String>
@@ -457,7 +564,7 @@ where
             config,
             move |data: &mut [T], _| {
                 scratch.resize(data.len(), 0.0);
-                lock(&mixer).render(channels, rate, &mut scratch);
+                lock(&mixer).render(channels, first_channel, rate, &mut scratch);
                 for (out, s) in data.iter_mut().zip(scratch.iter()) {
                     *out = T::from_sample(*s);
                 }

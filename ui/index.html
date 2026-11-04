@@ -166,7 +166,9 @@
       <select id="audioDevice"></select>
     </label>
     <button id="refreshDevices" title="Look for newly connected devices">Refresh</button>
+    <button id="deviceInfo" title="List every device the system reports">Diagnostics</button>
   </div>
+  <pre id="deviceDiag" class="small" style="display:none; max-height:180px; overflow:auto; white-space:pre-wrap; user-select:text"></pre>
   <p class="small">Switching the output stops anything that is playing. If the chosen device is unplugged,
      the Windows default is used until it returns (press Retry audio).</p>
   <div class="err" id="deviceErr"></div>
@@ -337,6 +339,7 @@ $('settings').addEventListener('click', async () => {
   $('overlap').checked = layout.overlap;
   updatePadTotal();
   $('layoutErr').textContent = '';
+  $('deviceDiag').style.display = 'none';
   loadDevices();
   $('pattern').value = await invoke('get_page_pattern');
   $('patternErr').textContent = '';
@@ -361,6 +364,12 @@ $('audioDevice').addEventListener('change', async () => {
   } catch (e) { $('deviceErr').textContent = String(e); }
 });
 $('refreshDevices').addEventListener('click', loadDevices);
+$('deviceInfo').addEventListener('click', async () => {
+  const pre = $('deviceDiag');
+  try { pre.textContent = await invoke('get_audio_diagnostics'); }
+  catch (e) { pre.textContent = String(e); }
+  pre.style.display = 'block';
+});
 $('readTags').addEventListener('change', async () => {
   $('tagsErr').textContent = '';
   const wanted = $('readTags').checked;

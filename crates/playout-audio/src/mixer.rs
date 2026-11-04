@@ -72,9 +72,11 @@ impl Mixer {
     }
 
     /// Fill `buf` (interleaved, `out_channels` wide) with the sum of all playing pads.
-    pub fn render(&mut self, out_channels: usize, out_rate: f64, buf: &mut [f32]) {
+    pub fn render(&mut self, out_channels: usize, ch_offset: usize, out_rate: f64, buf: &mut [f32]) {
         buf.fill(0.0);
         let oc = out_channels.max(1);
+        // Stereo goes to output channels (ch_offset, ch_offset + 1); fall back to 1-2 if they don't exist.
+        let off = if ch_offset + 1 < oc { ch_offset } else { 0 };
         let frames = buf.len() / oc;
 
         for pad in self.pads.iter_mut().chain(self.favs.iter_mut()) {
@@ -117,8 +119,8 @@ impl Mixer {
                 if oc == 1 {
                     buf[i] += (l + r) * 0.5 * g;
                 } else {
-                    buf[i * oc] += l * g;
-                    buf[i * oc + 1] += r * g;
+                    buf[i * oc + off] += l * g;
+                    buf[i * oc + off + 1] += r * g;
                 }
                 *pos += step;
             }
