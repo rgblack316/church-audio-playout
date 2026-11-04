@@ -69,6 +69,9 @@ jobs:
 
       - name: Build
         working-directory: src-tauri
+        env:
+          # Ad-hoc signature ("-"): macOS on Apple Silicon refuses to run completely unsigned apps.
+          APPLE_SIGNING_IDENTITY: ${{ startsWith(matrix.name, 'macos') && '-' || '' }}
         run: tauri build --bundles ${{ matrix.bundles }} ${{ matrix.args }}
 
       - uses: actions/upload-artifact@v4
