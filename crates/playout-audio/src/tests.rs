@@ -212,3 +212,24 @@ fn unknown_output_device_falls_back_instead_of_failing() {
     }
     e.set_device(None);
 }
+
+#[test]
+fn linux_device_names_become_readable_labels() {
+    use crate::{alsa_label, label_devices};
+    assert_eq!(alsa_label("sysdefault:CARD=PCH").as_deref(), Some("PCH"));
+    assert_eq!(alsa_label("hdmi:CARD=NVidia,DEV=2").as_deref(), Some("NVidia \u{2014} HDMI 3"));
+    assert_eq!(alsa_label("pipewire").as_deref(), Some("PipeWire (system mixer)"));
+    assert_eq!(alsa_label("hw:CARD=PCH,DEV=0"), None);
+    assert_eq!(alsa_label("surround40:CARD=PCH,DEV=0"), None);
+    assert_eq!(alsa_label("null"), None);
+    let names: Vec<String> = ["hw:CARD=PCH,DEV=0", "default", "pulse", "pipewire", "sysdefault:CARD=USB_Mixer", "front:CARD=PCH,DEV=0"]
+        .iter().map(|s| s.to_string()).collect();
+    let list = label_devices(names.clone(), None, true);
+    let labels: Vec<&str> = list.iter().map(|d| d.label.as_str()).collect();
+    assert_eq!(labels, ["PipeWire (system mixer)", "PulseAudio (system mixer)", "System default (ALSA)", "USB Mixer"]);
+    // A saved technical name stays selectable; other platforms are left untouched.
+    assert!(label_devices(names.clone(), Some("hw:CARD=PCH,DEV=0"), true).iter().any(|d| d.name == "hw:CARD=PCH,DEV=0"));
+    assert_eq!(label_devices(vec!["Speakers".into(), "Headphones".into()], None, false)[0].label, "Headphones");
+    // Nothing recognisable: show everything rather than an empty list.
+    assert_eq!(label_devices(vec!["hw:CARD=X,DEV=0".into()], None, true).len(), 1);
+}

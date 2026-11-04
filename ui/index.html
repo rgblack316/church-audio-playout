@@ -348,8 +348,8 @@ async function loadDevices() {
   try {
     const r = await invoke('list_audio_devices');
     sel.replaceChildren(new Option('System default', ''));
-    for (const d of r.devices) sel.add(new Option(d, d));
-    if (r.selected && !r.devices.includes(r.selected)) sel.add(new Option(`${r.selected} (not connected)`, r.selected));
+    for (const d of r.devices) sel.add(new Option(d.label, d.name));
+    if (r.selected && !r.devices.some((d) => d.name === r.selected)) sel.add(new Option(`${r.selected} (not connected)`, r.selected));
     sel.value = r.selected || '';
   } catch (e) { $('deviceErr').textContent = String(e); }
 }

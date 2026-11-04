@@ -51,15 +51,78 @@ pub struct Snapshot {
     pub favs: Vec<PadInfo>,
 }
 
-/// Names of the available audio output devices (for a device picker).
-pub fn list_output_devices() -> Vec<String> {
-    let mut names: Vec<String> = cpal::default_host()
+/// An output device: `name` is what is saved and matched, `label` is what people read.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DeviceEntry {
+    pub name: String,
+    pub label: String,
+}
+
+/// Plain-language label for a Linux ALSA device name, or None if it is a technical
+/// duplicate (hw:, plughw:, surround, dmix...) that should be hidden from the list.
+pub fn alsa_label(name: &str) -> Option<String> {
+    match name {
+        "default" => return Some("System default (ALSA)".into()),
+        "pipewire" => return Some("PipeWire (system mixer)".into()),
+        "pulse" => return Some("PulseAudio (system mixer)".into()),
+        "jack" => return Some("JACK".into()),
+        _ => {}
+    }
+    let (kind, rest) = name.split_once(':')?;
+    let field = |key: &str| {
+        rest.split(',').find_map(|kv| kv.strip_prefix(key).and_then(|v| v.strip_prefix('=')))
+    };
+    let card = field("CARD")?.replace('_', " ");
+    match kind {
+        "sysdefault" => Some(card),
+        "hdmi" => {
+            let n = field("DEV").and_then(|d| d.parse::<u32>().ok()).unwrap_or(0) + 1;
+            Some(format!("{card} \u{2014} HDMI {n}"))
+        }
+        _ => None,
+    }
+}
+
+/// Available audio output devices, easiest-to-choose first. On Linux the long list of
+/// technical ALSA names is reduced to readable choices; `keep` (the saved choice) is
+/// always included if it exists.
+pub fn list_output_devices(keep: Option<&str>) -> Vec<DeviceEntry> {
+    let names: Vec<String> = cpal::default_host()
         .output_devices()
         .map(|it| it.filter_map(|d| d.name().ok()).collect())
         .unwrap_or_default();
-    names.sort_by_key(|n| n.to_lowercase());
+    label_devices(names, keep, cfg!(target_os = "linux"))
+}
+
+fn label_devices(mut names: Vec<String>, keep: Option<&str>, alsa: bool) -> Vec<DeviceEntry> {
+    names.sort();
     names.dedup();
-    names
+    let plain = |n: &String| DeviceEntry { name: n.clone(), label: n.clone() };
+    if !alsa {
+        let mut v: Vec<DeviceEntry> = names.iter().map(plain).collect();
+        v.sort_by_key(|d| d.label.to_lowercase());
+        return v;
+    }
+    let mut v: Vec<DeviceEntry> = names
+        .iter()
+        .filter_map(|n| alsa_label(n).map(|label| DeviceEntry { name: n.clone(), label }))
+        .collect();
+    if let Some(k) = keep {
+        if names.iter().any(|n| n == k) && !v.iter().any(|d| d.name == k) {
+            v.push(DeviceEntry { name: k.to_string(), label: k.to_string() });
+        }
+    }
+    if v.is_empty() {
+        v = names.iter().map(plain).collect(); // never hide everything
+    }
+    let rank = |d: &DeviceEntry| match d.name.as_str() {
+        "pipewire" => 0,
+        "pulse" => 1,
+        "default" => 2,
+        _ => 3,
+    };
+    v.sort_by_key(|d| (rank(d), d.label.to_lowercase()));
+    v
 }
 
 enum Ctl {

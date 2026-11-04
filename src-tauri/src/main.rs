@@ -397,7 +397,7 @@ fn clear_pad(
 
 #[derive(Serialize)]
 struct AudioDevices {
-    devices: Vec<String>,
+    devices: Vec<playout_audio::DeviceEntry>,
     /// The saved choice (None = system default).
     selected: Option<String>,
 }
@@ -407,7 +407,7 @@ fn list_audio_devices(app: AppHandle, shared: State<'_, Shared>) -> AudioDevices
     let mut state = shared.lock().unwrap();
     ensure_init(&app, &mut state);
     AudioDevices {
-        devices: playout_audio::list_output_devices(),
+        devices: playout_audio::list_output_devices(state.settings.audio_device.as_deref()),
         selected: state.settings.audio_device.clone(),
     }
 }
