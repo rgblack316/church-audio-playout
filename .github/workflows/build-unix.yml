@@ -19,19 +19,23 @@ jobs:
             os: ubuntu-22.04
             bundles: deb,appimage
             args: ""
-            glob: "target/release/bundle/{deb,appimage}/*"
+            glob: |
+              target/release/bundle/deb/*.deb
+              target/release/bundle/appimage/*.AppImage
           - name: macos-arm64
             os: macos-latest
             bundles: dmg
             args: "--target aarch64-apple-darwin"
             target: aarch64-apple-darwin
-            glob: "target/aarch64-apple-darwin/release/bundle/dmg/*.dmg"
+            glob: |
+              target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
           - name: macos-intel
             os: macos-latest
             bundles: dmg
             args: "--target x86_64-apple-darwin"
             target: x86_64-apple-darwin
-            glob: "target/x86_64-apple-darwin/release/bundle/dmg/*.dmg"
+            glob: |
+              target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.name }}
     steps:
