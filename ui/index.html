@@ -61,7 +61,7 @@
   .meter i.hot { background: var(--accent); }
   .meter i.clip { background: var(--bad); }
   .meter b { position: absolute; top: 0; bottom: 0; width: 2px; left: 0; background: #e9edf5; opacity: .85; }
-  #recInfo { flex: 1; min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #recInfo { flex: 1; min-width: 0; color: var(--muted); overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-height: 1.3; font-size: .85em; overflow-wrap: anywhere; user-select: text; }
   #recInfo.err { color: #ffb3b3; }
   #recInfo.warn { color: var(--accent); }
   #recOpen { padding: .3rem .8rem; font-size: .82rem; background: transparent; white-space: nowrap; }
@@ -573,6 +573,7 @@ function renderRec(s) {
   $('recBtn').setAttribute('aria-label', s.recording ? 'Stop recording' : 'Start recording');
   const info = $('recInfo');
   info.className = '';
+  queueMicrotask(() => { info.title = info.textContent; });
   const free = s.free_bytes;
   const mb = (s.bytes / 1048576).toFixed(0);
   if (recNote && !s.recording) {
