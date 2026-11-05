@@ -268,3 +268,22 @@ fn multichannel_devices_get_one_entry_per_stereo_pair() {
     assert_eq!(parse_choice("Speakers"), ("Speakers", 0));
     assert_eq!(parse_choice("Odd@@name"), ("Odd@@name", 0));
 }
+
+#[test]
+fn fade_ramps_down_then_stops_and_rewinds() {
+    let mut m = Mixer::new(1, 0);
+    m.pads[0].decoded = Some(decoded(100, 1, vec![16384; 400])); // 4 s of 0.5 at 100 Hz
+    m.pads[0].playing = true;
+    m.pads[0].fade_total = 1.0;
+    m.pads[0].fade_left = 1.0;
+    let mut buf = vec![0.0f32; 150 * 2];
+    m.render(2, 0, 100.0, &mut buf);
+    // starts near full level, falls steadily, and is silent once the fade has run out
+    assert!(buf[0] > 0.45, "start {}", buf[0]);
+    assert!(buf[2 * 50] < buf[0] * 0.6 && buf[2 * 50] > 0.1, "mid {}", buf[2 * 50]);
+    for f in 1..99 {
+        assert!(buf[f * 2] <= buf[(f - 1) * 2] + 1e-6, "monotonic at {f}");
+    }
+    assert_eq!(buf[2 * 120], 0.0);
+    assert!(!m.pads[0].playing && m.pads[0].pos == 0.0 && m.pads[0].fade_total == 0.0);
+}

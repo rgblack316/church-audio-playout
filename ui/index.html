@@ -35,6 +35,7 @@
   #devicePill { flex: 0 1 24rem; color: #c4cddf; }
   .grow { flex: 1; min-width: 0; }
   header .stopall { background: #3a1a20; border: 1.5px solid var(--bad); color: #ffb3b3; font-weight: 600; font-size: .95rem; padding: .4rem 1.1rem; }
+  header .fadeall { border: 1.5px solid var(--accent); color: var(--accent); font-weight: 600; font-size: .95rem; padding: .4rem 1.1rem; }
   header .iconbtn { width: 2.3rem; height: 2.3rem; padding: 0; display: flex; align-items: center; justify-content: center; }
   header svg { width: 1.1rem; height: 1.1rem; }
 
@@ -111,6 +112,8 @@
   .pad.playing .time { color: #7ee8b4; }
   .pad.playing .fill { background: rgba(61,214,140,.18); }
   .pad.playing .go, .pad.playing .mini { background: #3a1a20; color: #ffb3b3; border: 1.5px solid var(--bad); }
+  .pad.fading .time { color: var(--accent); }
+  .pad.fading .fill { background: rgba(242,184,75,.18); }
   .pad.low { background: #2a1519; border-color: var(--bad); }
   .pad.low .time { color: #ff9a9a; }
   .pad.low .fill { background: rgba(255,123,123,.16); }
@@ -163,6 +166,7 @@
   <button id="rescan">Rescan</button>
   <div class="grow"></div>
   <div class="pill" id="devicePill"><svg viewBox="0 0 24 24" fill="none" stroke="#3dd68c" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/></svg><span id="device">Audio starting…</span></div>
+  <button id="fadeAll" class="fadeall" title="Fade out everything that is playing">Fade all</button>
   <button id="stopAll" class="stopall">Stop all</button>
   <button id="settings" class="iconbtn" aria-label="Settings" title="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
 </header>
@@ -213,6 +217,11 @@
     <span class="small">Favorites use the same number of columns as the pad grid.</span>
   </div>
   <label><input type="checkbox" id="overlap"> Allow pads to play at the same time</label>
+  <div class="row2">
+    <label>Fade-out length <input type="number" id="fadeSecs" min="0.5" max="30" step="0.5"> seconds</label>
+    <span class="small">Used by the Fade all button.</span>
+  </div>
+  <div class="err" id="fadeErr"></div>
   <p class="small">Turn this off and starting a pad stops all the others. Making the grid smaller removes pads
      from the end (loaded songs on them are cleared). Favorites keep their songs when you change the grid.</p>
   <div class="err" id="layoutErr"></div>
@@ -392,6 +401,8 @@ $('settings').addEventListener('click', async () => {
   $('layoutErr').textContent = '';
   $('deviceDiag').style.display = 'none';
   loadDevices();
+  invoke('get_fade_secs').then((v) => { $('fadeSecs').value = v; }).catch(() => {});
+  $('fadeErr').textContent = '';
   $('pattern').value = await invoke('get_page_pattern');
   $('patternErr').textContent = '';
   $('dlg').showModal();
@@ -413,6 +424,14 @@ $('audioDevice').addEventListener('change', async () => {
     await invoke('set_audio_device', { name: $('audioDevice').value || null });
     await pollPads();
   } catch (e) { $('deviceErr').textContent = String(e); }
+});
+$('fadeSecs').addEventListener('change', async () => {
+  $('fadeErr').textContent = '';
+  try { $('fadeSecs').value = await invoke('set_fade_secs', { secs: Number($('fadeSecs').value) }); }
+  catch (e) {
+    $('fadeErr').textContent = String(e);
+    invoke('get_fade_secs').then((v) => { $('fadeSecs').value = v; }).catch(() => {});
+  }
 });
 $('refreshDevices').addEventListener('click', loadDevices);
 $('deviceInfo').addEventListener('click', async () => {
@@ -538,7 +557,8 @@ function paintPad(el, p) {
   el.classList.toggle('empty', !p.loaded && !p.loading && !p.error);
   el.classList.toggle('error', !!p.error);
   el.classList.toggle('playing', p.playing);
-  el.classList.toggle('low', p.playing && remaining <= 10);
+  el.classList.toggle('low', p.playing && !p.fading && remaining <= 10);
+  el.classList.toggle('fading', !!p.fading);
   el.title = p.error || (p.loaded ? `${p.label}\n${p.sub}` : '');
 
   const empty = !p.loaded && !p.loading && !p.error;
@@ -627,6 +647,7 @@ $('results').addEventListener('dblclick', (ev) => {
   if (tr) loadIntoSelected(Number(tr.dataset.id));
 });
 $('stopAll').addEventListener('click', () => invoke('stop_all').catch(showError));
+$('fadeAll').addEventListener('click', () => invoke('fade_all').catch(showError));
 $('retryAudio').addEventListener('click', () => invoke('restart_audio').catch(showError));
 
 // ---------------- drag a song onto a pad or favorite ----------------

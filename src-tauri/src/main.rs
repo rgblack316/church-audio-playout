@@ -37,6 +37,9 @@ struct Settings {
     /// Read ID3 / other tags (artist, album, length) when scanning.
     #[serde(default = "default_overlap")]
     read_tags: bool,
+    /// Length of the "Fade all" fade-out, in seconds.
+    #[serde(default = "default_fade_secs")]
+    fade_secs: f32,
     /// Chosen audio output device (None = the Windows default).
     #[serde(default)]
     audio_device: Option<String>,
@@ -62,6 +65,9 @@ fn default_columns() -> usize {
 fn default_rows() -> usize {
     DEFAULT_ROWS
 }
+fn default_fade_secs() -> f32 {
+    3.0
+}
 fn default_overlap() -> bool {
     true
 }
@@ -80,6 +86,7 @@ impl Default for Settings {
             overlap: true,
             fav_rows: DEFAULT_FAV_ROWS,
             read_tags: true,
+            fade_secs: default_fade_secs(),
             audio_device: None,
             favorites: vec![None; FAV_SLOTS],
         }
@@ -388,6 +395,36 @@ fn stop_all(engine: State<'_, Engine>) {
     engine.stop_all()
 }
 
+/// Fade everything that is playing out over the configured time, then stop it.
+#[tauri::command]
+fn fade_all(app: AppHandle, shared: State<'_, Shared>, engine: State<'_, Engine>) {
+    let secs = {
+        let mut state = shared.lock().unwrap();
+        ensure_init(&app, &mut state);
+        state.settings.fade_secs
+    };
+    engine.fade_all(secs);
+}
+
+#[tauri::command]
+fn get_fade_secs(app: AppHandle, shared: State<'_, Shared>) -> f32 {
+    let mut state = shared.lock().unwrap();
+    ensure_init(&app, &mut state);
+    state.settings.fade_secs
+}
+
+#[tauri::command]
+fn set_fade_secs(app: AppHandle, shared: State<'_, Shared>, secs: f32) -> Result<f32, String> {
+    if !secs.is_finite() || !(0.5..=30.0).contains(&secs) {
+        return Err("Fade length must be between 0.5 and 30 seconds".into());
+    }
+    let mut state = shared.lock().unwrap();
+    ensure_init(&app, &mut state);
+    state.settings.fade_secs = secs;
+    save_settings(&app, &state.settings)?;
+    Ok(secs)
+}
+
 /// Empty a pad. For a favorite this also forgets the saved song.
 #[tauri::command]
 fn clear_pad(
@@ -610,6 +647,9 @@ fn main() {
             play_pad,
             stop_pad,
             stop_all,
+            fade_all,
+            get_fade_secs,
+            set_fade_secs,
             clear_pad,
             restart_audio,
             list_audio_devices,

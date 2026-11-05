@@ -39,6 +39,8 @@ pub struct PadInfo {
     pub duration_secs: f64,
     pub position_secs: f64,
     pub playing: bool,
+    /// Fading out (will stop by itself).
+    pub fading: bool,
     pub loading: bool,
     pub error: String,
 }
@@ -390,6 +392,7 @@ impl Engine {
         }
         let p = &mut m.bank(bank)[pad];
         p.pos = 0.0;
+        p.fade_total = 0.0;
         p.playing = true;
         Ok(())
     }
@@ -399,6 +402,19 @@ impl Engine {
         if let Some(p) = lock(&self.mixer).bank(bank).get_mut(pad) {
             p.playing = false;
             p.pos = 0.0;
+        }
+    }
+
+    /// Fade everything that is playing down to silence over `secs`, then stop and rewind it.
+    pub fn fade_all(&self, secs: f32) {
+        let secs = secs.max(0.1);
+        let mut guard = lock(&self.mixer);
+        let m = &mut *guard;
+        for p in m.pads.iter_mut().chain(m.favs.iter_mut()) {
+            if p.playing && p.fade_total == 0.0 {
+                p.fade_total = secs;
+                p.fade_left = secs;
+            }
         }
     }
 
@@ -433,6 +449,7 @@ impl Engine {
                         duration_secs: duration,
                         position_secs: position,
                         playing: p.playing,
+                        fading: p.playing && p.fade_total > 0.0,
                         loading: p.loading,
                         error: p.error.clone(),
                     }

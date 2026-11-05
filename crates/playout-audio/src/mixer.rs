@@ -20,6 +20,9 @@ pub struct Pad {
     pub pos: f64,
     pub playing: bool,
     pub gain: f32,
+    /// Fade-out in progress: total length and time left, in seconds (total 0 = not fading).
+    pub fade_total: f32,
+    pub fade_left: f32,
     /// A file is being decoded for this pad.
     pub loading: bool,
     /// Non-empty when the last load failed (shown on the pad).
@@ -35,6 +38,8 @@ impl Pad {
             pos: 0.0,
             playing: false,
             gain: 1.0,
+            fade_total: 0.0,
+            fade_left: 0.0,
             loading: false,
             error: String::new(),
         }
@@ -83,7 +88,7 @@ impl Mixer {
             if !pad.playing {
                 continue;
             }
-            let Pad { decoded, pos, playing, gain, .. } = pad;
+            let Pad { decoded, pos, playing, gain, fade_total, fade_left, .. } = pad;
             let dec = match decoded {
                 Some(d) => d,
                 None => {
@@ -104,6 +109,7 @@ impl Mixer {
                     *pos = 0.0;
                     break;
                 }
+                let fade = if *fade_total > 0.0 { (*fade_left / *fade_total).max(0.0) } else { 1.0 };
                 let frac = (*pos - idx as f64) as f32;
                 let idx1 = (idx + 1).min(total - 1);
                 let (l, r) = if src_ch == 1 {
@@ -116,13 +122,23 @@ impl Mixer {
                     let (lb, rb) = (s[idx1 * 2] as f32, s[idx1 * 2 + 1] as f32);
                     (la + (lb - la) * frac, ra + (rb - ra) * frac)
                 };
+                let gf = g * fade;
                 if oc == 1 {
-                    buf[i] += (l + r) * 0.5 * g;
+                    buf[i] += (l + r) * 0.5 * gf;
                 } else {
-                    buf[i * oc + off] += l * g;
-                    buf[i * oc + off + 1] += r * g;
+                    buf[i * oc + off] += l * gf;
+                    buf[i * oc + off + 1] += r * gf;
                 }
                 *pos += step;
+                if *fade_total > 0.0 {
+                    *fade_left -= (1.0 / out_rate) as f32;
+                    if *fade_left <= 0.0 {
+                        *playing = false; // fade finished: stopped and rewound
+                        *pos = 0.0;
+                        *fade_total = 0.0;
+                        break;
+                    }
+                }
             }
         }
 
