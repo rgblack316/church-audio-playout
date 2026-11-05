@@ -46,6 +46,12 @@ struct Settings {
     /// Chosen recording input (None = the Windows default input; "Name@@3" = channels 3-4).
     #[serde(default)]
     record_device: Option<String>,
+    /// Level recordings automatically when they stop.
+    #[serde(default = "default_overlap")]
+    auto_level: bool,
+    /// Loudness target for leveling, in LUFS.
+    #[serde(default = "default_target_lufs")]
+    target_lufs: f64,
     /// Chosen audio output device (None = the Windows default).
     #[serde(default)]
     audio_device: Option<String>,
@@ -71,6 +77,10 @@ fn default_columns() -> usize {
 fn default_rows() -> usize {
     DEFAULT_ROWS
 }
+fn default_target_lufs() -> f64 {
+    -16.0
+}
+
 fn default_fade_secs() -> f32 {
     3.0
 }
@@ -96,6 +106,8 @@ impl Default for Settings {
             record_dir: None,
             record_device: None,
             audio_device: None,
+            auto_level: true,
+            target_lufs: default_target_lufs(),
             favorites: vec![None; FAV_SLOTS],
         }
     }
@@ -609,9 +621,116 @@ fn start_recording(
     Ok(path.display().to_string())
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+struct LevelStatus {
+    /// "idle", "working", "done" or "skipped"/"error" (see `message`).
+    state: &'static str,
+    progress: f32,
+    file: Option<String>,
+    message: Option<String>,
+    report: Option<playout_audio::level::LevelReport>,
+}
+
+struct LevelJob(Mutex<LevelStatus>);
+
+fn set_level(job: &LevelJob, f: impl FnOnce(&mut LevelStatus)) {
+    f(&mut job.0.lock().unwrap());
+}
+
+/// Level `path` in the background and record the outcome in `LevelJob`.
+fn spawn_level(app: AppHandle, path: PathBuf, target: f64) {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+    {
+        let job = app.state::<LevelJob>();
+        if path.with_file_name(format!(
+            "{} (part 2).wav",
+            path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+        ))
+        .exists()
+        {
+            set_level(&job, |l| {
+                *l = LevelStatus {
+                    state: "skipped",
+                    file: name.clone(),
+                    message: Some("Recording has several parts, so it was not leveled".into()),
+                    ..Default::default()
+                }
+            });
+            return;
+        }
+        set_level(&job, |l| *l = LevelStatus { state: "working", file: name.clone(), ..Default::default() });
+    }
+    std::thread::spawn(move || {
+        let out = playout_audio::level::leveled_path(&path);
+        let result = {
+            let job = app.state::<LevelJob>();
+            let mut last = -1.0f32;
+            playout_audio::level::level_wav(&path, &out, target, &mut |p| {
+                if p - last >= 0.01 || p >= 1.0 {
+                    last = p;
+                    set_level(&job, |l| l.progress = p);
+                }
+            })
+        };
+        let job = app.state::<LevelJob>();
+        set_level(&job, |l| {
+            *l = match result {
+                Ok(r) => LevelStatus {
+                    state: "done",
+                    progress: 1.0,
+                    file: out.file_name().map(|n| n.to_string_lossy().into_owned()),
+                    message: None,
+                    report: Some(r),
+                },
+                Err(e) => LevelStatus { state: "error", file: name.clone(), message: Some(e), ..Default::default() },
+            }
+        });
+    });
+}
+
 #[tauri::command(async)]
-fn stop_recording(recorder: State<'_, Recorder>) -> Option<String> {
-    recorder.stop().map(|p| p.display().to_string())
+fn stop_recording(app: AppHandle, shared: State<'_, Shared>, recorder: State<'_, Recorder>) -> Option<String> {
+    let path = recorder.stop()?;
+    let (auto, target) = {
+        let state = shared.lock().unwrap();
+        (state.settings.auto_level, state.settings.target_lufs)
+    };
+    if auto {
+        spawn_level(app, path.clone(), target);
+    } else {
+        set_level(&app.state::<LevelJob>(), |l| *l = LevelStatus { state: "idle", ..Default::default() });
+    }
+    Some(path.display().to_string())
+}
+
+#[derive(Serialize)]
+struct LevelSettings {
+    auto: bool,
+    target: f64,
+}
+
+#[tauri::command]
+fn get_level_settings(app: AppHandle, shared: State<'_, Shared>) -> LevelSettings {
+    let mut state = shared.lock().unwrap();
+    ensure_init(&app, &mut state);
+    LevelSettings { auto: state.settings.auto_level, target: state.settings.target_lufs }
+}
+
+#[tauri::command]
+fn set_level_settings(app: AppHandle, shared: State<'_, Shared>, auto: bool, target: f64) -> Result<(), String> {
+    if !(-30.0..=-10.0).contains(&target) {
+        return Err("Choose a target between -30 and -10 LUFS".into());
+    }
+    let mut state = shared.lock().unwrap();
+    ensure_init(&app, &mut state);
+    state.settings.auto_level = auto;
+    state.settings.target_lufs = target;
+    save_settings(&app, &state.settings)
+}
+
+#[tauri::command]
+fn get_level_status(job: State<'_, LevelJob>) -> LevelStatus {
+    job.0.lock().unwrap().clone()
 }
 
 #[derive(Serialize)]
@@ -784,6 +903,7 @@ fn main() {
         .manage(Shared::new(AppState::default()))
         .manage(ScanLock(Mutex::new(())))
         .manage(Recorder::new())
+        .manage(LevelJob(Mutex::new(LevelStatus { state: "idle", ..Default::default() })))
         .on_window_event(|window, event| {
             // Closing the app mid-recording still finishes the WAV file properly.
             if let tauri::WindowEvent::CloseRequested { .. } = event {
@@ -822,6 +942,9 @@ fn main() {
             get_record_settings,
             list_input_devices,
             set_record_device,
+            get_level_settings,
+            set_level_settings,
+            get_level_status,
             set_record_dir,
             start_recording,
             stop_recording,

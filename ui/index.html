@@ -283,6 +283,19 @@
     <label>Save to <input type="text" id="recDir" spellcheck="false" style="min-width:24rem"></label>
     <button id="recDirPick">Choose…</button>
   </div>
+  <div class="row2">
+    <label><input type="checkbox" id="autoLevel"> Level automatically after recording</label>
+    <label>Target
+      <select id="levelPreset">
+        <option value="-16">-16 LUFS (podcast)</option>
+        <option value="-14">-14 LUFS (louder)</option>
+        <option value="-18">-18 LUFS</option>
+        <option value="-19">-19 LUFS (quieter)</option>
+      </select>
+    </label>
+  </div>
+  <p class="small">The original recording is kept; a copy named <code>&hellip;-leveled.wav</code> is made with its
+     loudness set to the target, and peaks held under -1 dB.</p>
   <p class="small">Recordings are saved as 24-bit WAV, named with the date and time. Use a folder that is not
      synced by OneDrive. Windows is kept awake while recording.</p>
   <div class="err" id="recErr"></div>
@@ -493,10 +506,20 @@ async function loadRecordSettings() {
     if (r.selected && !r.devices.some((d) => d.name === r.selected)) sel.add(new Option(`${r.selected} (not connected)`, r.selected));
     sel.value = r.selected || '';
     $('recDir').value = rs.dir;
+    const ls = await invoke('get_level_settings');
+    $('autoLevel').checked = ls.auto;
+    const preset = $('levelPreset');
+    if (![...preset.options].some((o) => Number(o.value) === ls.target)) preset.add(new Option(`${ls.target} LUFS`, String(ls.target)));
+    preset.value = String(ls.target);
   } catch (e) { $('recErr').textContent = String(e); }
 }
 $('recInput').addEventListener('change', () =>
   invoke('set_record_device', { name: $('recInput').value || null }).catch((e) => { $('recErr').textContent = String(e); }));
+const saveLevel = () =>
+  invoke('set_level_settings', { auto: $('autoLevel').checked, target: Number($('levelPreset').value) })
+    .catch((e) => { $('recErr').textContent = String(e); });
+$('autoLevel').addEventListener('change', saveLevel);
+$('levelPreset').addEventListener('change', saveLevel);
 $('refreshInputs').addEventListener('click', loadRecordSettings);
 async function saveRecDir(path) {
   $('recErr').textContent = '';
@@ -566,6 +589,15 @@ function renderRec(s) {
       if (secsLeft < 3600) info.className = 'warn';
     }
     info.textContent = text;
+  } else if (levelState.state === 'working') {
+    info.className = 'warn';
+    info.textContent = `Leveling ${levelState.file}\u2026 ${Math.round(levelState.progress * 100)}%`;
+  } else if (levelState.state === 'done' && levelState.report) {
+    const r = levelState.report;
+    info.textContent = `Saved ${levelState.file} \u00b7 ${r.measured_lufs.toFixed(1)} \u2192 ${r.final_lufs.toFixed(1)} LUFS (${r.gain_db >= 0 ? '+' : ''}${r.gain_db.toFixed(1)} dB)${r.limited ? ' \u00b7 peaks limited' : ''}`;
+  } else if (levelState.state === 'error' || levelState.state === 'skipped') {
+    info.className = 'err';
+    info.textContent = `Not leveled: ${levelState.message}`;
   } else if (s.path) {
     info.textContent = `Saved ${baseName(s.path)} (${fmtClock(s.elapsed_secs)}, ${mb} MB)`;
   } else {
@@ -573,11 +605,16 @@ function renderRec(s) {
   }
 }
 
+let levelState = { state: 'idle', progress: 0 };
 let recPolling = false;
 async function pollRec() {
   if (recPolling) return;
   recPolling = true;
-  try { renderRec(await invoke('get_rec_status')); } catch (e) { /* app closing */ }
+  try {
+    const [st, lv] = await Promise.all([invoke('get_rec_status'), invoke('get_level_status')]);
+    levelState = lv || { state: "idle", progress: 0 };
+    renderRec(st);
+  } catch (e) { /* app closing */ }
   recPolling = false;
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "playout-audio"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Audio decoding and multi-pad mixing for the church playout app"
 
@@ -13,6 +13,7 @@ cpal = "0.16"
 serde = { version = "1", features = ["derive"] }
 symphonia = { version = "0.5", features = ["all"] }
 hound = "3.5"
+ebur128 = "0.1"
 windows = { version = "0.58", optional = true, features = [
   "Win32_Foundation",
   "Win32_Media_MediaFoundation",

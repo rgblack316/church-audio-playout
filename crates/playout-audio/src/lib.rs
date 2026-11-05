@@ -2,6 +2,7 @@
 
 pub mod decode;
 pub mod mixer;
+pub mod level;
 pub mod record;
 #[cfg(feature = "mf")]
 mod mf;

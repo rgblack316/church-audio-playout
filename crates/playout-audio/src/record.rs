@@ -103,7 +103,7 @@ pub(crate) fn stereo_pair(data: &[f32], channels: usize, first: usize, out: &mut
     }
 }
 
-fn part_path(base: &Path, part: u32) -> PathBuf {
+pub fn part_path(base: &Path, part: u32) -> PathBuf {
     if part == 1 {
         return base.to_path_buf();
     }
