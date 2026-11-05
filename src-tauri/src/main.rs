@@ -308,11 +308,25 @@ fn search(shared: State<'_, Shared>, mut query: Query) -> Vec<Track> {
 
 // ---------- playback ----------
 
-fn pad_sub(track: &Track) -> String {
-    match track.page {
-        Some(p) => format!("{} \u{b7} p. {}", track.songbook, p),
-        None => track.songbook.clone(),
+/// Name shown on a pad: the tag title when the file has one, else the title from the file name.
+fn pad_label(track: &Track) -> String {
+    match track.tag_title.as_deref().map(str::trim) {
+        Some(t) if !t.is_empty() => t.to_string(),
+        _ => track.title.clone(),
     }
+}
+
+/// Second line on a pad: "Artist \u{b7} Songbook \u{b7} p. 123" (parts that are missing are left out).
+fn pad_sub(track: &Track) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(a) = track.artist.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+        parts.push(a.to_string());
+    }
+    parts.push(track.songbook.clone());
+    if let Some(p) = track.page {
+        parts.push(format!("p. {p}"));
+    }
+    parts.join(" \u{b7} ")
 }
 
 #[tauri::command]
@@ -345,13 +359,13 @@ fn load_pad(
         }
     };
     let sub = pad_sub(&track);
-    engine.load(bank, pad, Arc::new(decoded), track.title.clone(), sub.clone())?;
+    engine.load(bank, pad, Arc::new(decoded), pad_label(&track), sub.clone())?;
     if bank == Bank::Fav {
         let mut state = shared.lock().unwrap();
         ensure_init(&app, &mut state);
         state.settings.favorites[pad] = Some(Favorite {
             path: track.path.clone(),
-            title: track.title.clone(),
+            title: pad_label(&track),
             sub,
         });
         save_settings(&app, &state.settings)?;
@@ -612,6 +626,37 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn track() -> Track {
+        Track {
+            id: 0,
+            path: "/m/Hymnal/Amazing Grace 123.mp3".into(),
+            songbook: "Hymnal".into(),
+            title: "Amazing Grace".into(),
+            page: Some(123),
+            file_name: "Amazing Grace 123.mp3".into(),
+            ext: "mp3".into(),
+            tag_title: None,
+            artist: None,
+            album: None,
+            duration_secs: None,
+        }
+    }
+
+    #[test]
+    fn pad_text_uses_tags_when_present() {
+        let mut t = track();
+        assert_eq!(pad_label(&t), "Amazing Grace");
+        assert_eq!(pad_sub(&t), "Hymnal \u{b7} p. 123");
+        t.tag_title = Some("  Amazing Grace (Newton) ".into());
+        t.artist = Some("Choir".into());
+        assert_eq!(pad_label(&t), "Amazing Grace (Newton)");
+        assert_eq!(pad_sub(&t), "Choir \u{b7} Hymnal \u{b7} p. 123");
+        t.tag_title = Some("   ".into());
+        t.page = None;
+        assert_eq!(pad_label(&t), "Amazing Grace");
+        assert_eq!(pad_sub(&t), "Choir \u{b7} Hymnal");
+    }
 
     #[test]
     fn old_settings_files_still_load() {

@@ -6,148 +6,207 @@
 <title>Church Playout</title>
 <style>
   :root {
-    --bg: #11151f; --panel: #1a2030; --line: #2a3350; --text: #e8ecf6;
-    --muted: #8b95b3; --accent: #f0c450; --bad: #ff7a7a;
+    --bg: #0e1117; --bar: #131823; --panel: #161b25; --panel2: #1d2432; --line: #2a3345;
+    --text: #e9edf5; --muted: #9aa6bd; --faint: #7d889f; --accent: #f2b84b;
+    --good: #3dd68c; --bad: #ff7b7b;
   }
   * { box-sizing: border-box; }
+  /* Everything is sized in rem, and the root size follows the window, so the whole interface
+     grows and shrinks together and stays readable. */
+  html { font-size: clamp(13px, calc(0.42vw + 0.55vh + 5.2px), 24px); }
   body { margin: 0; background: var(--bg); color: var(--text);
-         font: 16px/1.4 "Segoe UI", system-ui, sans-serif; display: flex;
-         flex-direction: column; height: 100vh; }
-  header { display: flex; gap: 12px; align-items: center; padding: 12px 16px;
-           background: var(--panel); border-bottom: 1px solid var(--line); }
-  header h1 { font-size: 18px; margin: 0 12px 0 0; color: var(--accent); }
-  #folder { color: var(--muted); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  button, select, input { font: inherit; color: var(--text); background: #232b42;
-         border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; }
+         font: 1rem/1.4 "IBM Plex Sans", "Segoe UI", system-ui, sans-serif; display: flex;
+         flex-direction: column; height: 100vh; overflow: hidden; }
+  button, select, input { font: inherit; color: var(--text); background: var(--panel2);
+         border: 1px solid var(--line); border-radius: .5rem; padding: .4rem .75rem; }
   button { cursor: pointer; }
-  button:hover { border-color: var(--accent); }
-  main { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 16px; gap: 12px; }
-  .bar { display: flex; gap: 12px; }
-  #q { flex: 1; font-size: 20px; }
-  #songbook { min-width: 220px; }
-  #results { flex: 1; overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); }
-  th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 600; }
-  tr.row:hover { background: #232b42; }
-  td.page { width: 70px; color: var(--accent); font-variant-numeric: tabular-nums; white-space: nowrap; }
-  td.fmt { width: 70px; color: var(--muted); text-transform: uppercase; white-space: nowrap; }
-  td.len { width: 70px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
-  td.name { overflow-wrap: anywhere; }            /* show the whole file name, wrapping if it is long */
-  td.tag { color: var(--muted); overflow-wrap: anywhere; }
-  .empty { padding: 24px; color: var(--muted); }
-  footer { padding: 8px 16px; color: var(--muted); border-top: 1px solid var(--line);
-           background: var(--panel); display: flex; gap: 16px; align-items: center; }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .4; cursor: default; }
+  button:focus-visible, input:focus-visible, select:focus-visible, .pad:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  header { flex: none; display: flex; gap: .7rem; align-items: center; padding: .6rem 1rem;
+           background: var(--bar); border-bottom: 1px solid var(--line); min-width: 0; }
+  header h1 { font-size: 1.1rem; margin: 0 .4rem 0 0; color: var(--accent); font-weight: 600; white-space: nowrap; }
+  header button { background: transparent; padding: .35rem .8rem; font-size: .85rem; white-space: nowrap; }
+  .pill { display: flex; align-items: center; gap: .5rem; min-width: 0; padding: .35rem .75rem; border-radius: .5rem;
+          background: var(--panel2); border: 1px solid var(--line); color: var(--muted); font-size: .82rem; }
+  .pill span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #folderPill { flex: 0 1 22rem; }
+  #devicePill { flex: 0 1 24rem; color: #c4cddf; }
+  .grow { flex: 1; min-width: 0; }
+  header .stopall { background: #3a1a20; border: 1.5px solid var(--bad); color: #ffb3b3; font-weight: 600; font-size: .95rem; padding: .4rem 1.1rem; }
+  header .iconbtn { width: 2.3rem; height: 2.3rem; padding: 0; display: flex; align-items: center; justify-content: center; }
+  header svg { width: 1.1rem; height: 1.1rem; }
+
+  #audioBanner { display: none; background: #4a1f26; color: #ffd0d0; padding: .5rem 1rem;
+                 border-bottom: 1px solid var(--line); align-items: center; gap: .75rem; }
+
+  main { flex: 1; display: flex; gap: 1rem; min-height: 0; padding: 1rem; }
+
+  /* ---- library ---- */
+  #library { width: clamp(19rem, 36vw, 44rem); flex: none; display: flex; flex-direction: column; gap: .7rem; min-height: 0; }
+  .searchrow { display: flex; gap: .5rem; }
+  #q { flex: 1; min-width: 0; font-size: 1.15rem; padding: .55rem .9rem; border: 1.5px solid var(--accent); background: var(--panel); border-radius: .65rem; }
+  #songbook { width: 10rem; max-width: 40%; background: var(--panel); border-radius: .65rem; }
+  .libinfo { display: flex; align-items: center; gap: .6rem; font-size: .8rem; color: var(--muted); padding: 0 .1rem; min-height: 1.1rem; }
+  #tagProg { flex: 1; height: .25rem; border-radius: .15rem; background: var(--panel2); overflow: hidden; display: none; }
+  #tagProg i { display: block; height: 100%; width: 0; background: var(--accent); }
+  #results { flex: 1; min-height: 0; overflow-y: auto; background: var(--panel); border: 1px solid var(--line); border-radius: .75rem; user-select: none; }
+  .row { display: flex; gap: .75rem; padding: .7rem 1rem; border-bottom: 1px solid #222a3a; cursor: grab; align-items: flex-start; }
+  .row:hover { background: var(--panel2); }
+  .row.sel { background: #1f2740; box-shadow: inset 3px 0 0 var(--accent); }
+  .row.first { box-shadow: inset 3px 0 0 var(--accent); }
+  .row .pg { width: 3rem; flex: none; font: 600 .95rem "IBM Plex Mono", Consolas, monospace; color: var(--accent); padding-top: .05rem; }
+  .row .tx { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: .1rem; }
+  .row .t1 { font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
+  .row .t2 { font-size: .8rem; color: var(--muted); line-height: 1.3; overflow-wrap: anywhere; }
+  .row .t3 { font-size: .76rem; color: var(--faint); line-height: 1.3; overflow-wrap: anywhere; }   /* full file name, wrapping if long */
+  .row .ln { width: 3rem; flex: none; text-align: right; font: .82rem "IBM Plex Mono", Consolas, monospace; color: #c4cddf; padding-top: .1rem; }
+  .empty { padding: 1.5rem; color: var(--muted); }
+  .hint { flex: none; font-size: .78rem; color: var(--muted); padding: .1rem .2rem; }
+
+  /* ---- deck: pads on top, favorites below, same card size ---- */
+  #deck { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: .9rem; min-height: 0; overflow-y: auto; }
+  #padsSec { flex: var(--rows, 2) 1 auto; display: flex; flex-direction: column; gap: .5rem; }
+  #favSection { flex: var(--fav-rows, 1) 1 auto; display: flex; flex-direction: column; gap: .5rem; }
+  #favSection[hidden] { display: none; }
+  .sectionTitle { flex: none; display: flex; align-items: center; gap: .6rem; font-size: .72rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  .sectionTitle small { font-size: .72rem; letter-spacing: 0; text-transform: none; color: var(--faint); font-weight: 400; }
+  #favSection .sectionTitle { color: var(--accent); }
+  .grid { flex: 1; display: grid; gap: .75rem; min-height: 0;
+          grid-template-columns: repeat(var(--cols, 4), minmax(0, 1fr));
+          grid-template-rows: repeat(var(--rows, 2), minmax(5.4rem, 1fr)); }
+
+  /* ---- pad card: its contents scale with the card itself ---- */
+  .pad { position: relative; overflow: hidden; min-width: 0; min-height: 0; container-type: size; cursor: pointer;
+         display: flex; flex-direction: column; gap: 3cqh; padding: 6cqh 6cqw; border-radius: .75rem;
+         background: var(--panel); border: 1.5px solid var(--line); }
+  .pad.fav { border-top: .25rem solid var(--accent); }
+  .pad .fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: rgba(61,214,140,.18); pointer-events: none; }
+  .pad > :not(.fill) { position: relative; }
+  .pad .top { display: flex; align-items: center; gap: 4cqw; flex: none; }
+  .pad .chip { display: inline-flex; align-items: center; justify-content: center; min-width: 1.6rem; padding: 0 .4rem; height: 1.35rem;
+               border-radius: .4rem; background: var(--panel2); color: #c4cddf; font: 600 .74rem "IBM Plex Mono", Consolas, monospace; }
+  .pad.fav .chip { background: rgba(242,184,75,.16); color: var(--accent); }
+  .pad .time { margin-left: auto; font: 600 clamp(1rem, min(11.5cqw, 15cqh), 2.6rem)/1 "IBM Plex Mono", Consolas, monospace; font-variant-numeric: tabular-nums; color: #c4cddf; }
+  .pad .mid { display: flex; align-items: flex-start; gap: 4cqw; min-height: 0; }
+  .pad .label { flex: 1; min-width: 0; font-weight: 600; line-height: 1.25; color: var(--text); overflow: hidden; overflow-wrap: anywhere;
+                font-size: clamp(.78rem, min(7.2cqw, 10.5cqh), 1.4rem);
+                display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .pad .sub { flex: none; color: #aab4c9; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+              font-size: clamp(.68rem, min(5.9cqw, 8.5cqh), 1.05rem); }
+  .pad .sub.err { color: #ffb3b3; white-space: normal; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+  .pad .spacer { flex: 1; min-height: 0; }
+  .pad .actions { display: flex; gap: 4cqw; flex: none; }
+  .pad .go { flex: 1; height: clamp(1.7rem, 21cqh, 2.8rem); padding: 0; border: none; border-radius: .5rem; background: var(--accent); color: #1a1405;
+             font-weight: 600; font-size: clamp(.8rem, min(6.5cqw, 10cqh), 1.25rem); }
+  .pad .go:hover:not(:disabled) { filter: brightness(1.08); }
+  .pad .clr { flex: none; width: clamp(1.7rem, 21cqh, 2.8rem); height: clamp(1.7rem, 21cqh, 2.8rem); padding: 0; background: transparent; color: var(--muted); border-radius: .5rem; }
+  .pad .mini { display: none; flex: none; width: 1.9rem; height: 1.9rem; padding: 0; border: none; border-radius: .5rem; background: var(--accent); color: #1a1405; font-size: .75rem; }
+  .pad .hintline { flex: 1; display: flex; align-items: center; justify-content: center; text-align: center; color: var(--faint); font-size: clamp(.7rem, min(5.6cqw, 9cqh), 1rem); line-height: 1.4; padding: 0 4cqw; }
+
+  .pad.empty { background: transparent; border-style: dashed; border-color: #34405a; }
+  .pad.selected { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(242,184,75,.28); }
+  .pad.playing { background: #122a20; border-color: var(--good); }
+  .pad.playing .time { color: #7ee8b4; }
+  .pad.playing .fill { background: rgba(61,214,140,.18); }
+  .pad.playing .go, .pad.playing .mini { background: #3a1a20; color: #ffb3b3; border: 1.5px solid var(--bad); }
+  .pad.low { background: #2a1519; border-color: var(--bad); }
+  .pad.low .time { color: #ff9a9a; }
+  .pad.low .fill { background: rgba(255,123,123,.16); }
+  .pad.error { background: #2a1519; border-color: var(--bad); border-style: dashed; }
+  .pad.dropover { outline: 3px dashed var(--accent); outline-offset: 2px; }
+
+  /* Short cards drop the least important parts, but always keep the title and the time. */
+  @container (max-height: 8.6rem) { .pad .sub { display: none; } .pad .actions { display: none; } .pad .mini { display: block; } .pad .spacer { display: none; } }
+  @container (max-height: 5.4rem) { .pad .top .chip { display: none; } .pad .hintline { font-size: .7rem; } }
+  @container (max-width: 8.5rem) { .pad .clr { display: none; } .pad .chip { min-width: 1.3rem; } }
+
+  /* ---- status bar ---- */
+  footer { flex: none; display: flex; gap: 1rem; align-items: center; padding: .35rem 1rem; background: var(--bar);
+           border-top: 1px solid var(--line); font-size: .8rem; color: var(--muted); min-width: 0; }
+  footer span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   footer .spacer { flex: 1; }
+  footer b { color: var(--accent); font-weight: 600; }
+
+  /* ---- narrow windows: library goes under the pads ---- */
+  @media (max-width: 960px) {
+    main { flex-direction: column-reverse; }
+    #library { width: auto; height: 42%; }
+    #devicePill { display: none; }
+  }
+
+  /* ---- drag ghost ---- */
+  body.dragging, body.dragging * { cursor: grabbing !important; user-select: none; }
+  .ghost { position: fixed; pointer-events: none; z-index: 1000; background: var(--accent); color: #111;
+           padding: .25rem .65rem; border-radius: .4rem; font-weight: 600; max-width: 22rem; overflow: hidden;
+           white-space: nowrap; text-overflow: ellipsis; box-shadow: 0 4px 14px rgba(0,0,0,.5); }
+
+  /* ---- settings dialog ---- */
   dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line);
-           border-radius: 10px; width: min(720px, 92vw); }
+           border-radius: .75rem; width: min(46rem, 92vw); max-height: 90vh; overflow-y: auto; }
   dialog::backdrop { background: rgba(0,0,0,.6); }
   dialog h2 { margin-top: 0; }
   dialog input[type=text] { width: 100%; font-family: Consolas, monospace; }
-  .small { color: var(--muted); font-size: 13px; }
+  input[type=number] { width: 5rem; }
+  .row2 { display: flex; gap: 1rem; align-items: center; margin: .5rem 0; flex-wrap: wrap; }
+  .small { color: var(--muted); font-size: .82rem; }
   .err { color: var(--bad); min-height: 1.4em; }
-  ul.files { max-height: 220px; overflow: auto; padding-left: 18px; margin: 6px 0; font-size: 14px; }
-  #audioBanner { display: none; background: #4a1f26; color: #ffd0d0; padding: 8px 16px;
-                 border-bottom: 1px solid var(--line); align-items: center; gap: 12px; }
-  .grid { display: grid; gap: 10px; min-height: 0;
-          grid-template-columns: repeat(var(--cols, 4), minmax(0, 1fr));
-          grid-template-rows: repeat(var(--rows, 2), minmax(0, 1fr)); }
-  /* The deck (pads + favorites) takes a share of the window and divides it among its rows. */
-  #deck { flex: 0 0 var(--deck-h, 56%); min-height: 120px; display: flex; flex-direction: column; gap: 8px; }
-  #pads { flex: var(--pad-weight, 2) 1 0; }
-  #favSection { flex: var(--fav-weight, 1) 1 0; min-height: 0; display: flex; flex-direction: column; }
-  #favSection[hidden] { display: none; }
-  #favs { flex: 1; }
-  #split { flex: none; height: 8px; margin: -4px 0; cursor: row-resize; border-radius: 4px; position: relative; z-index: 2; }
-  #split::after { content: ""; position: absolute; left: 40%; right: 40%; top: 3px; height: 2px; background: var(--line); border-radius: 1px; }
-  #split:hover::after, body.splitting #split::after { background: var(--accent); }
-  body.splitting, body.splitting * { cursor: row-resize !important; user-select: none; }
-  .sectionTitle { color: var(--muted); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; margin: 0 0 4px; flex: none; }
-  .pad.fav { border-top: 4px solid var(--accent); }
-  .pad.dropover { outline: 3px dashed var(--accent); outline-offset: 2px; }
-  .pad .sub.err { color: var(--bad); }
-  tr.row { cursor: grab; }
-  #results { user-select: none; }
-  body.dragging, body.dragging * { cursor: grabbing !important; user-select: none; }
-  .ghost { position: fixed; pointer-events: none; z-index: 1000; background: var(--accent); color: #111;
-           padding: 4px 10px; border-radius: 6px; font-weight: 600; max-width: 320px; overflow: hidden;
-           white-space: nowrap; text-overflow: ellipsis; box-shadow: 0 4px 14px rgba(0,0,0,.5); }
-  tr.row.first td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
-  input[type=number] { width: 80px; }
-  .row { display: flex; gap: 16px; align-items: center; margin: 8px 0; }
-  .pad { background: var(--panel); border: 2px solid var(--line); border-radius: 10px; min-width: 0; min-height: 0;
-         padding: 1.2cqh 1.5cqw; display: flex; flex-direction: column; gap: 1cqh; cursor: pointer;
-         overflow: hidden; container-type: size; }
-  .pad.selected { border-color: var(--accent); }
-  .pad.playing { background: #1d3326; border-color: #4fbf7a; }
-  .pad .num { color: var(--muted); font-size: clamp(10px, 8cqh, 12px); flex: none; }
-  .pad .label { font-weight: 600; line-height: 1.25; flex: 1 1 0; min-height: 0; overflow: hidden; overflow-wrap: anywhere;
-                font-size: clamp(12px, 11cqh, 16px);
-                display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-  .pad .sub { color: var(--muted); font-size: clamp(10px, 8cqh, 13px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; }
-  .pad .time { font-size: clamp(14px, 22cqh, 36px); font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.1; flex: none; }
-  .pad.low .time { color: var(--bad); }
-  .pad .bar { height: 5px; flex: none; background: #232b42; border-radius: 3px; overflow: hidden; }
-  .pad .bar > i { display: block; height: 100%; width: 0; background: var(--accent); }
-  .pad .btns { display: flex; gap: 6px; flex: none; }
-  .pad .btns button { padding: 0 8px; height: clamp(22px, 17cqh, 40px); line-height: 1; }
-  .pad .btns .go { flex: 1; font-size: clamp(12px, 9cqh, 16px); }
-  .pad .btns button:disabled { opacity: .4; cursor: default; }
-  /* Short cards drop the least important parts so the rest stays readable. */
-  @container (max-height: 150px) { .num { display: none; } }
-  @container (max-height: 115px) { .sub, .bar { display: none; } .btns button { height: clamp(20px, 22cqh, 32px); } }
-  @container (max-height: 80px)  {
-    .pad { flex-direction: row; align-items: center; gap: 8px; }
-    .label { flex: 1 1 0; -webkit-line-clamp: 2; font-size: 12px; }
-    .time { font-size: 14px; } .btns { flex-direction: row; } }
-  @container (max-width: 150px) { .sub { display: none; } .btns .clr { display: none; } }
-  .stopall { border-color: var(--bad); }
+  ul.files { max-height: 14rem; overflow: auto; padding-left: 1.2rem; margin: .4rem 0; font-size: .88rem; }
 </style>
 </head>
 <body>
 <header>
   <h1>Church Playout</h1>
-  <div id="folder">No music folder selected</div>
-  <button id="choose">Choose music folder…</button>
+  <div class="pill" id="folderPill" title="Music folder"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span id="folder">No music folder selected</span></div>
+  <button id="choose">Change folder</button>
   <button id="rescan">Rescan</button>
+  <div class="grow"></div>
+  <div class="pill" id="devicePill"><svg viewBox="0 0 24 24" fill="none" stroke="#3dd68c" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/></svg><span id="device">Audio starting…</span></div>
   <button id="stopAll" class="stopall">Stop all</button>
-  <button id="settings">Settings</button>
+  <button id="settings" class="iconbtn" aria-label="Settings" title="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
 </header>
 <div id="audioBanner"><span id="audioMsg"></span><button id="retryAudio">Retry audio</button></div>
 
 <main>
-  <div id="deck">
-    <section id="pads" class="grid"></section>
-    <section id="favSection">
-      <div class="sectionTitle">Favorites</div>
+  <section id="library" aria-label="Song library">
+    <div class="searchrow">
+      <input id="q" type="search" placeholder="Page number or title…" autofocus aria-label="Search songs">
+      <select id="songbook" aria-label="Songbook"><option value="">All songbooks</option></select>
+    </div>
+    <div class="libinfo"><span id="libInfo"></span><div id="tagProg"><i></i></div></div>
+    <div id="results"><div class="empty">Choose your music folder to begin.</div></div>
+    <div class="hint">Double-click, press Enter, or drag a song onto a pad or favorite.</div>
+  </section>
+
+  <section id="deck" aria-label="Pads and favorites">
+    <div id="padsSec">
+      <div class="sectionTitle">Pads <small id="padsDim"></small></div>
+      <div id="pads" class="grid"></div>
+    </div>
+    <div id="favSection">
+      <div class="sectionTitle">&#9733; Favorites <small>loaded at startup</small></div>
       <div id="favs" class="grid"></div>
-    </section>
-  </div>
-  <div id="split" title="Drag to resize the pads"></div>
-  <div class="bar">
-    <select id="songbook"><option value="">All songbooks</option></select>
-    <input id="q" type="search" placeholder="Page number or title… e.g. 123, or amazing grace" autofocus>
-  </div>
-  <div id="results"><div class="empty">Choose your music folder to begin.</div></div>
+    </div>
+  </section>
 </main>
 
 <footer>
   <span id="status">Ready</span>
-  <span class="small">Click a pad to select it · double-click a song or drag it onto a pad or favorite</span>
+  <span>Selected: <b id="selName">pad 1</b></span>
   <span class="spacer"></span>
   <span id="warn"></span>
-  <span id="device"></span>
 </footer>
 
 <dialog id="dlg">
   <h2>Settings</h2>
   <p><strong>Pad grid</strong></p>
-  <div class="row">
+  <div class="row2">
     <label>Columns <input type="number" id="cols" min="1" max="8"></label>
     <label>Rows <input type="number" id="rows" min="1" max="8"></label>
     <span class="small" id="padTotal"></span>
   </div>
-  <div class="row">
+  <div class="row2">
     <label>Favorite rows
       <select id="favRows"><option value="0">None</option><option value="1">1</option><option value="2">2</option></select>
     </label>
@@ -161,7 +220,7 @@
     <button id="applyLayout">Apply layout</button>
   </div>
   <hr style="border-color: var(--line)">
-  <div class="row">
+  <div class="row2">
     <label><strong>Audio output</strong>
       <select id="audioDevice"></select>
     </label>
@@ -240,47 +299,39 @@ function renderResults(tracks, haveFolder) {
   const box = $('results');
   if (!haveFolder) {
     box.innerHTML = '<div class="empty">Choose your music folder to begin.</div>';
+    $('libInfo').textContent = '';
     return;
   }
   if (!tracks.length) {
     box.innerHTML = '<div class="empty">No matching songs.</div>';
+    $('libInfo').textContent = '0 matches';
     return;
   }
-  // Tag columns only appear when at least one result has that tag.
-  const has = (f) => tracks.some((t) => f(t));
-  const columns = [
-    { head: 'Page', cls: 'page', get: (t) => t.page ?? '\u2014', show: true },
-    { head: 'File name', cls: 'name', get: (t) => t.file_name, show: true },
-    { head: 'Title (tag)', cls: 'tag', get: (t) => t.tag_title ?? '', show: has((t) => t.tag_title) },
-    { head: 'Artist', cls: 'tag', get: (t) => t.artist ?? '', show: has((t) => t.artist) },
-    { head: 'Album', cls: 'tag', get: (t) => t.album ?? '', show: has((t) => t.album) },
-    { head: 'Length', cls: 'len', get: (t) => (t.duration_secs ? fmtLength(t.duration_secs) : ''), show: has((t) => t.duration_secs) },
-    { head: 'Songbook', cls: '', get: (t) => t.songbook, show: true },
-    { head: 'Type', cls: 'fmt', get: (t) => t.ext, show: true },
-  ].filter((c) => c.show);
-
-  const table = document.createElement('table');
-  const head = table.createTHead().insertRow();
-  for (const c of columns) {
-    const th = document.createElement('th');
-    th.textContent = c.head;
-    head.append(th);
-  }
-  const body = table.createTBody();
-  for (const t of tracks) {
-    const tr = body.insertRow();
-    tr.className = 'row';
-    tr.title = t.path;
-    tr.dataset.id = t.id;
-    tr.dataset.name = t.file_name;
-    if (t === tracks[0] && $('q').value.trim()) tr.classList.add('first');
-    for (const c of columns) {
-      const td = tr.insertCell();
-      td.textContent = c.get(t);
-      if (c.cls) td.className = c.cls;
-    }
-  }
-  box.replaceChildren(table);
+  const frag = document.createDocumentFragment();
+  tracks.forEach((t, i) => {
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.title = t.path;
+    row.dataset.id = t.id;
+    row.dataset.name = t.tag_title || t.file_name;
+    if (i === 0 && $('q').value.trim()) row.classList.add('first');
+    const add = (cls, text) => {
+      const d = document.createElement('div');
+      d.className = cls;
+      d.textContent = text;
+      return d;
+    };
+    const tx = document.createElement('div');
+    tx.className = 'tx';
+    tx.append(add('t1', t.tag_title || t.title));
+    const meta = [t.artist, t.album, t.songbook].filter(Boolean).join(' \u00b7 ');
+    tx.append(add('t2', meta));
+    tx.append(add('t3', t.file_name));
+    row.append(add('pg', t.page ?? '\u2014'), tx, add('ln', t.duration_secs ? fmtLength(t.duration_secs) : ''));
+    frag.append(row);
+  });
+  box.replaceChildren(frag);
+  $('libInfo').textContent = tracks.length >= 500 ? '500+ matches (showing the first 500)' : `${tracks.length} match${tracks.length === 1 ? '' : 'es'}`;
 }
 
 let haveFolder = false;
@@ -415,20 +466,25 @@ const padName = (bank, index) => bank === 'fav'
 
 function makePad(bank, index) {
   const el = document.createElement('div');
-  el.className = bank === 'fav' ? 'pad fav' : 'pad';
+  el.className = bank === 'fav' ? 'pad fav empty' : 'pad empty';
   el.dataset.bank = bank;
   el.dataset.index = index;
-  el.innerHTML = '<div class="num"></div><div class="label"></div><div class="sub"></div>' +
-    '<div class="time">0:00</div><div class="bar"><i></i></div>' +
-    '<div class="btns"><button class="go"></button><button class="clr" title="Empty this pad">✕</button></div>';
-  el.querySelector('.num').textContent = bank === 'fav' ? `Favorite ${padName(bank, index)}` : `Pad ${index + 1}`;
+  el.tabIndex = 0;
+  el.innerHTML = '<div class="fill"></div>' +
+    '<div class="top"><span class="chip"></span><span class="time">\u2013:\u2013\u2013</span></div>' +
+    '<div class="mid"><div class="label"></div><button class="mini" tabindex="-1"></button></div>' +
+    '<div class="sub"></div><div class="hintline"></div><div class="spacer"></div>' +
+    '<div class="actions"><button class="go"></button><button class="clr" title="Empty this pad" aria-label="Empty this pad">\u2715</button></div>';
+  el.querySelector('.chip').textContent = bank === 'fav' ? padName(bank, index).toUpperCase() : String(index + 1);
   el.addEventListener('click', () => select(bank, index));
-  el.querySelector('.go').addEventListener('click', (ev) => {
+  const toggle = (ev) => {
     ev.stopPropagation();
     const p = bankList(bank)[index];
     if (!p) return;
     invoke(p.playing ? 'stop_pad' : 'play_pad', { bank, pad: index }).catch(showError);
-  });
+  };
+  el.querySelector('.go').addEventListener('click', toggle);
+  el.querySelector('.mini').addEventListener('click', toggle);
   el.querySelector('.clr').addEventListener('click', (ev) => {
     ev.stopPropagation();
     invoke('clear_pad', { bank, pad: index }).catch(showError);
@@ -460,7 +516,7 @@ function buildFavs() {
       favEls.set(slot, el);
     }
   }
-  $('favSection').style.display = layout.fav_rows ? '' : 'none';
+  $('favSection').hidden = layout.fav_rows === 0;
   paintSelection();
 }
 
@@ -472,25 +528,45 @@ function select(bank, index) {
 function paintSelection() {
   mainEls.forEach((el, i) => el.classList.toggle('selected', selected.bank === 'main' && selected.index === i));
   favEls.forEach((el, slot) => el.classList.toggle('selected', selected.bank === 'fav' && selected.index === slot));
+  const name = padName(selected.bank, selected.index);
+  $('selName').textContent = name.charAt(0).toUpperCase() + name.slice(1);
 }
 
 function paintPad(el, p) {
   const remaining = Math.max(0, p.duration_secs - p.position_secs);
+  const filled = p.loaded && !p.error;
+  el.classList.toggle('empty', !p.loaded && !p.loading && !p.error);
+  el.classList.toggle('error', !!p.error);
   el.classList.toggle('playing', p.playing);
   el.classList.toggle('low', p.playing && remaining <= 10);
   el.title = p.error || (p.loaded ? `${p.label}\n${p.sub}` : '');
-  el.querySelector('.label').textContent =
-    p.loading ? 'Loading…' : (p.loaded || p.error) ? p.label : 'Empty';
+
+  const empty = !p.loaded && !p.loading && !p.error;
+  el.querySelector('.label').textContent = p.loading ? (p.label || 'Loading\u2026') : (p.loaded || p.error) ? p.label : '';
   const sub = el.querySelector('.sub');
-  sub.textContent = p.error || p.sub;
+  sub.textContent = p.error ? p.error : p.loading ? 'Loading into memory\u2026' : p.sub;
   sub.classList.toggle('err', !!p.error);
-  el.querySelector('.time').textContent = p.loading ? '…' : !p.loaded ? '–:––'
-    : p.playing ? '−' + fmt(remaining) : fmt(p.duration_secs);
-  el.querySelector('.bar > i').style.width =
-    p.loaded && p.duration_secs > 0 ? `${(100 * p.position_secs / p.duration_secs).toFixed(1)}%` : '0';
+  sub.style.display = empty ? 'none' : '';
+  el.querySelector('.hintline').textContent = empty
+    ? (el.dataset.bank === 'fav' ? 'Empty favorite. Double-click a song or drag one here.' : 'Empty. Double-click a song or drag one here.')
+    : '';
+  el.querySelector('.hintline').style.display = empty ? '' : 'none';
+  el.querySelector('.mid').style.display = empty ? 'none' : '';
+  el.querySelector('.actions').style.display = empty ? 'none' : '';
+  el.querySelector('.spacer').style.display = empty ? 'none' : '';
+  el.querySelector('.time').textContent = p.loading ? '\u2026' : !p.loaded ? '\u2013:\u2013\u2013'
+    : p.playing ? '\u2212' + fmt(remaining) : fmt(p.duration_secs);
+  el.querySelector('.fill').style.width =
+    filled && p.playing && p.duration_secs > 0 ? `${(100 * p.position_secs / p.duration_secs).toFixed(1)}%` : '0';
+  const text = p.playing ? '\u25a0 Stop' : '\u25b6 Play';
   const go = el.querySelector('.go');
-  go.textContent = p.playing ? '■ Stop' : '▶ Play';
-  go.disabled = !p.loaded;
+  go.textContent = text;
+  go.disabled = !filled;
+  const mini = el.querySelector('.mini');
+  mini.textContent = p.playing ? '\u25a0' : '\u25b6';
+  mini.setAttribute('aria-label', text);
+  mini.disabled = !filled;
+  el.querySelector('.go').setAttribute('aria-label', `${p.playing ? 'Stop' : 'Play'} ${p.label || ''}`.trim());
   el.querySelector('.clr').disabled = p.playing || (!p.loaded && !p.error);
 }
 
@@ -501,7 +577,7 @@ function renderSnapshot(s) {
   $('audioBanner').style.display = s.audio.ok ? 'none' : 'flex';
   if (!s.audio.ok) $('audioMsg').textContent = s.audio.error || 'Audio output is not available';
   $('device').textContent = s.audio.ok
-    ? `Output: ${s.audio.device} (${s.audio.sample_rate} Hz)` +
+    ? `${s.audio.device} \u00b7 ${s.audio.sample_rate} Hz` +
       (s.audio.missing_device ? ` \u2014 "${s.audio.missing_device}" not found, using default` : '')
     : '';
 
@@ -547,7 +623,7 @@ async function loadInto(target, trackId, advance) {
 const loadIntoSelected = (trackId) => loadInto(selected, trackId, true);
 
 $('results').addEventListener('dblclick', (ev) => {
-  const tr = ev.target.closest('tr.row');
+  const tr = ev.target.closest('.row');
   if (tr) loadIntoSelected(Number(tr.dataset.id));
 });
 $('stopAll').addEventListener('click', () => invoke('stop_all').catch(showError));
@@ -571,8 +647,10 @@ function endDrag() {
 
 $('results').addEventListener('pointerdown', (ev) => {
   if (ev.button !== 0) return;
-  const tr = ev.target.closest('tr.row');
+  const tr = ev.target.closest('.row');
   if (!tr) return;
+  document.querySelectorAll('#results .row.sel').forEach((r) => r.classList.remove('sel'));
+  tr.classList.add('sel');
   drag = { id: Number(tr.dataset.id), title: tr.dataset.name,
            x: ev.clientX, y: ev.clientY, active: false, ghost: null, over: null };
 });
@@ -610,17 +688,15 @@ document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') endDrag(
 
 // ---------------- layout ----------------
 function applyLayoutUi() {
-  for (const id of ['pads', 'favs']) {
-    const box = $(id);
-    box.style.setProperty('--cols', layout.columns);
-  }
+  for (const id of ['pads', 'favs']) $(id).style.setProperty('--cols', layout.columns);
   $('pads').style.setProperty('--rows', layout.rows);
   $('favs').style.setProperty('--rows', Math.max(layout.fav_rows, 1));
-  // Rows share the deck's height: a favorite row gets about 60% of a pad row.
+  // Pad rows and favorite rows get the same height, so favorites are as big as pads.
   const deck = $('deck').style;
-  deck.setProperty('--pad-weight', layout.rows);
-  deck.setProperty('--fav-weight', layout.fav_rows * 0.6);
+  deck.setProperty('--rows', layout.rows);
+  deck.setProperty('--fav-rows', layout.fav_rows);
   $('favSection').hidden = layout.fav_rows === 0;
+  $('padsDim').textContent = `${layout.columns} \u00d7 ${layout.rows}`;
   const n = layout.columns * layout.rows;
   if (mainEls.length !== n) buildPads(n);
   const key = `${layout.columns}x${layout.fav_rows}`;
@@ -662,50 +738,24 @@ $('q').addEventListener('keydown', (ev) => {
   }
 });
 
-// ---------------- splitter between the deck and the song list ----------------
-(function () {
-  let saved = null;
-  try { saved = Number(localStorage.getItem('deckPct')); } catch (e) {}
-  if (saved >= 15 && saved <= 85) $('deck').style.setProperty('--deck-h', saved + '%');
-  const split = $('split');
-  let dragging = false;
-  split.addEventListener('pointerdown', (ev) => {
-    dragging = true;
-    document.body.classList.add('splitting');
-    try { split.setPointerCapture(ev.pointerId); } catch (e) {}
-  });
-  split.addEventListener('pointermove', (ev) => {
-    if (!dragging) return;
-    const main = document.querySelector('main').getBoundingClientRect();
-    const top = $('deck').getBoundingClientRect().top;
-    const pct = Math.min(85, Math.max(15, ((ev.clientY - top) / (main.height - 32)) * 100));
-    $('deck').style.setProperty('--deck-h', pct.toFixed(1) + '%');
-    split.dataset.pct = pct.toFixed(1);
-  });
-  const stop = () => {
-    if (!dragging) return;
-    dragging = false;
-    document.body.classList.remove('splitting');
-    try { if (split.dataset.pct) localStorage.setItem('deckPct', split.dataset.pct); } catch (e) {}
-  };
-  split.addEventListener('pointerup', stop);
-  split.addEventListener('pointercancel', stop);
-})();
-
 // ---------------- background tag reading ----------------
 let tagTimer = null;
 function watchTags() {
   clearTimeout(tagTimer);
   let lastRefresh = 0;
+  const bar = $('tagProg');
   const tick = async () => {
     let p;
     try { p = await invoke('get_scan_progress'); } catch (e) { return; }
-    if (!p || !p.total) return;
+    if (!p || !p.total) { bar.style.display = 'none'; return; }
     if (p.done < p.total) {
-      setStatus(`Reading tags ${p.done} / ${p.total}…`);
+      bar.style.display = 'block';
+      bar.firstElementChild.style.width = `${(100 * p.done / p.total).toFixed(1)}%`;
+      setStatus(`Reading tags ${p.done} / ${p.total}\u2026`);
       if (Date.now() - lastRefresh > 2500) { lastRefresh = Date.now(); runSearch(); }
       tagTimer = setTimeout(tick, 600);
     } else {
+      bar.style.display = 'none';
       runSearch();
       invoke('get_state').then(applySummary).catch(() => {});
     }
