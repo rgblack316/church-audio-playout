@@ -31,7 +31,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 pub fn list_input_devices(keep: Option<&str>) -> Vec<DeviceEntry> {
     let host = cpal::default_host();
     let found: Vec<(String, u16)> = host
-        .devices()
+        .input_devices()
         .map(|it| {
             it.filter_map(|d| {
                 let name = d.name().ok()?;
@@ -332,7 +332,7 @@ fn open_input(
     let (name, first) = choice.map(parse_choice).map(|(n, f)| (Some(n), f)).unwrap_or((None, 0));
     let device = match name {
         Some(n) => host
-            .devices()
+            .input_devices()
             .map_err(|e| format!("Could not list audio devices: {e}"))?
             .find(|d| d.name().map(|dn| dn == n).unwrap_or(false))
             .ok_or_else(|| format!("Input device \"{n}\" was not found"))?,

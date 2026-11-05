@@ -498,7 +498,7 @@ fn try_open(
     let chosen = wanted.and_then(|w| {
         let (name, first) = parse_choice(w);
         let found = host
-            .devices()
+            .output_devices()
             .ok()?
             .find(|d| d.name().map(|n| n == name).unwrap_or(false));
         match found {
