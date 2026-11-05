@@ -407,7 +407,35 @@ where
             },
             None,
         )
-        .map_err(|e| format!("Could not open the input: {e}"))
+        .map_err(|e| input_error(&e.to_string()))
+}
+
+/// Plain-language version of the common Windows audio errors.
+fn input_error(raw: &str) -> String {
+    let lower = raw.to_ascii_lowercase();
+    let hint = if lower.contains("8889000a") {
+        " \u{2014} another program is using this input exclusively. Close other audio programs (Audacity, OBS, a recorder app), \
+          or turn off \"Allow applications to take exclusive control\" for the device in Windows Sound settings, or pick a different input."
+    } else if lower.contains("80070005") {
+        " \u{2014} Windows is blocking microphone access. Turn on Settings > Privacy > Microphone > \"Let desktop apps access your microphone\"."
+    } else if lower.contains("88890008") {
+        " \u{2014} the input does not support this format. Pick a different input or channel pair."
+    } else {
+        ""
+    };
+    format!("Could not open the input: {raw}{hint}")
+}
+
+#[cfg(test)]
+mod hint_tests {
+    use super::input_error;
+
+    #[test]
+    fn known_windows_errors_get_a_hint() {
+        assert!(input_error("A Backend-specific error has occurred: 0x8889000A").contains("exclusively"));
+        assert!(input_error("denied 0x80070005").contains("Privacy"));
+        assert_eq!(input_error("weird"), "Could not open the input: weird");
+    }
 }
 
 /// Keep Windows from sleeping while a recording runs. The setting belongs to the calling
