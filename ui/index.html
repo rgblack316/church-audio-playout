@@ -79,12 +79,13 @@
           grid-template-rows: repeat(var(--rows, 2), minmax(5.4rem, 1fr)); }
 
   /* ---- pad card: its contents scale with the card itself ---- */
+  /* cq units resolve against the nearest ANCESTOR container, so the card itself (the container)
+     must not use them: its padding and gaps live on the inner wrapper instead. */
   .pad { position: relative; overflow: hidden; min-width: 0; min-height: 0; container-type: size; cursor: pointer;
-         display: flex; flex-direction: column; gap: 3cqh; padding: 6cqh 6cqw; border-radius: .75rem;
-         background: var(--panel); border: 1.5px solid var(--line); }
+         border-radius: .75rem; background: var(--panel); border: 1.5px solid var(--line); }
+  .pad .in { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 3cqh; padding: 6cqh 6cqw; min-width: 0; min-height: 0; }
   .pad.fav { border-top: .25rem solid var(--accent); }
   .pad .fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: rgba(61,214,140,.18); pointer-events: none; }
-  .pad > :not(.fill) { position: relative; }
   .pad .top { display: flex; align-items: center; gap: 4cqw; flex: none; }
   .pad .chip { display: inline-flex; align-items: center; justify-content: center; min-width: 1.6rem; padding: 0 .4rem; height: 1.35rem;
                border-radius: .4rem; background: var(--panel2); color: #c4cddf; font: 600 .74rem "IBM Plex Mono", Consolas, monospace; }
@@ -489,11 +490,11 @@ function makePad(bank, index) {
   el.dataset.bank = bank;
   el.dataset.index = index;
   el.tabIndex = 0;
-  el.innerHTML = '<div class="fill"></div>' +
+  el.innerHTML = '<div class="fill"></div><div class="in">' +
     '<div class="top"><span class="chip"></span><span class="time">\u2013:\u2013\u2013</span></div>' +
     '<div class="mid"><div class="label"></div><button class="mini" tabindex="-1"></button></div>' +
     '<div class="sub"></div><div class="hintline"></div><div class="spacer"></div>' +
-    '<div class="actions"><button class="go"></button><button class="clr" title="Empty this pad" aria-label="Empty this pad">\u2715</button></div>';
+    '<div class="actions"><button class="go"></button><button class="clr" title="Empty this pad" aria-label="Empty this pad">\u2715</button></div></div>';
   el.querySelector('.chip').textContent = bank === 'fav' ? padName(bank, index).toUpperCase() : String(index + 1);
   el.addEventListener('click', () => select(bank, index));
   const toggle = (ev) => {

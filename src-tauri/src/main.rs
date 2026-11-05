@@ -205,7 +205,7 @@ fn do_scan(app: &AppHandle) -> Result<(), String> {
 
 fn read_tags_in_background(app: AppHandle, generation: u64, pending: Vec<Pending>) {
     let shared = app.state::<Shared>();
-    for chunk in pending.chunks(48) {
+    for chunk in pending.chunks(12) {
         if shared.lock().unwrap().scan_gen != generation {
             return; // a newer scan replaced this library
         }
