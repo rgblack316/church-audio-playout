@@ -12,10 +12,12 @@ mf = ["dep:windows"]
 cpal = "0.16"
 serde = { version = "1", features = ["derive"] }
 symphonia = { version = "0.5", features = ["all"] }
+hound = "3.5"
 windows = { version = "0.58", optional = true, features = [
   "Win32_Foundation",
   "Win32_Media_MediaFoundation",
   "Win32_System_Com",
+  "Win32_System_Power",
 ] }
 
 [dev-dependencies]

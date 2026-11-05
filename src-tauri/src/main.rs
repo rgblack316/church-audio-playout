@@ -4,7 +4,7 @@ use playout_core::{
     read_pending, scan_quick, Library, MetaCache, Pending, Problem, Query, ScanOptions, Track, DEFAULT_PAGE_PATTERN,
 };
 use serde::{Deserialize, Serialize};
-use playout_audio::{decode_file, Bank, Engine, Snapshot};
+use playout_audio::{decode_file, Bank, Engine, RecStatus, Recorder, Snapshot};
 use std::{fs, path::Path, path::PathBuf, sync::Arc, sync::Mutex};
 use tauri::{AppHandle, Manager, State};
 
@@ -40,6 +40,12 @@ struct Settings {
     /// Length of the "Fade all" fade-out, in seconds.
     #[serde(default = "default_fade_secs")]
     fade_secs: f32,
+    /// Folder recordings are saved in (None = Documents\\Church Recordings).
+    #[serde(default)]
+    record_dir: Option<String>,
+    /// Chosen recording input (None = the Windows default input; "Name@@3" = channels 3-4).
+    #[serde(default)]
+    record_device: Option<String>,
     /// Chosen audio output device (None = the Windows default).
     #[serde(default)]
     audio_device: Option<String>,
@@ -87,6 +93,8 @@ impl Default for Settings {
             fav_rows: DEFAULT_FAV_ROWS,
             read_tags: true,
             fade_secs: default_fade_secs(),
+            record_dir: None,
+            record_device: None,
             audio_device: None,
             favorites: vec![None; FAV_SLOTS],
         }
@@ -493,6 +501,155 @@ fn restart_audio(engine: State<'_, Engine>) {
     engine.restart_audio()
 }
 
+// ---------- recording ----------
+
+/// Characters Windows does not allow in file names are replaced; names are kept short.
+fn clean_file_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| if c.is_control() || "\\/:*?\"<>|".contains(c) { ' ' } else { c })
+        .collect();
+    let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    cleaned.trim_matches('.').chars().take(80).collect::<String>().trim().to_string()
+}
+
+/// `<dir>/2026-11-08 0930 Sermon.wav`; a number is added if that file already exists.
+fn recording_path(dir: &Path, name: &str, stamp: &str) -> PathBuf {
+    let name = clean_file_name(name);
+    let base = if name.is_empty() { stamp.to_string() } else { format!("{stamp} {name}") };
+    let mut path = dir.join(format!("{base}.wav"));
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("{base} ({n}).wav"));
+        n += 1;
+    }
+    path
+}
+
+fn record_dir_of(app: &AppHandle, settings: &Settings) -> PathBuf {
+    match settings.record_dir.as_deref().filter(|d| !d.trim().is_empty()) {
+        Some(d) => PathBuf::from(d),
+        None => app
+            .path()
+            .document_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("Church Recordings"),
+    }
+}
+
+#[derive(Serialize)]
+struct RecordSettings {
+    dir: String,
+    device: Option<String>,
+}
+
+#[tauri::command]
+fn get_record_settings(app: AppHandle, shared: State<'_, Shared>) -> RecordSettings {
+    let mut state = shared.lock().unwrap();
+    ensure_init(&app, &mut state);
+    RecordSettings {
+        dir: record_dir_of(&app, &state.settings).display().to_string(),
+        device: state.settings.record_device.clone(),
+    }
+}
+
+#[derive(Serialize)]
+struct InputDevices {
+    devices: Vec<playout_audio::DeviceEntry>,
+    selected: Option<String>,
+}
+
+#[tauri::command(async)]
+fn list_input_devices(app: AppHandle, shared: State<'_, Shared>) -> InputDevices {
+    let mut state = shared.lock().unwrap();
+    ensure_init(&app, &mut state);
+    InputDevices {
+        devices: playout_audio::list_input_devices(state.settings.record_device.as_deref()),
+        selected: state.settings.record_device.clone(),
+    }
+}
+
+#[tauri::command]
+fn set_record_device(app: AppHandle, shared: State<'_, Shared>, name: Option<String>) -> Result<(), String> {
+    let mut state = shared.lock().unwrap();
+    ensure_init(&app, &mut state);
+    state.settings.record_device = name.filter(|n| !n.trim().is_empty());
+    save_settings(&app, &state.settings)
+}
+
+#[tauri::command]
+fn set_record_dir(app: AppHandle, shared: State<'_, Shared>, path: String) -> Result<String, String> {
+    let path = path.trim().to_string();
+    let mut state = shared.lock().unwrap();
+    ensure_init(&app, &mut state);
+    if !path.is_empty() {
+        fs::create_dir_all(&path).map_err(|e| format!("Cannot use that folder: {e}"))?;
+    }
+    state.settings.record_dir = (!path.is_empty()).then_some(path);
+    save_settings(&app, &state.settings)?;
+    Ok(record_dir_of(&app, &state.settings).display().to_string())
+}
+
+#[tauri::command(async)]
+fn start_recording(
+    app: AppHandle,
+    shared: State<'_, Shared>,
+    recorder: State<'_, Recorder>,
+    name: Option<String>,
+) -> Result<String, String> {
+    let (dir, device) = {
+        let mut state = shared.lock().unwrap();
+        ensure_init(&app, &mut state);
+        (record_dir_of(&app, &state.settings), state.settings.record_device.clone())
+    };
+    fs::create_dir_all(&dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
+    let stamp = chrono::Local::now().format("%Y-%m-%d %H%M").to_string();
+    let path = recording_path(&dir, name.as_deref().unwrap_or(""), &stamp);
+    recorder.start(device.as_deref(), path.clone())?;
+    Ok(path.display().to_string())
+}
+
+#[tauri::command(async)]
+fn stop_recording(recorder: State<'_, Recorder>) -> Option<String> {
+    recorder.stop().map(|p| p.display().to_string())
+}
+
+#[derive(Serialize)]
+struct RecInfo {
+    #[serde(flatten)]
+    status: RecStatus,
+    free_bytes: Option<u64>,
+}
+
+/// Recording state for the UI: time, levels, file size and free disk space.
+#[tauri::command]
+fn get_rec_status(app: AppHandle, shared: State<'_, Shared>, recorder: State<'_, Recorder>) -> RecInfo {
+    let status = recorder.status();
+    let dir = {
+        let mut state = shared.lock().unwrap();
+        ensure_init(&app, &mut state);
+        record_dir_of(&app, &state.settings)
+    };
+    let existing = dir.ancestors().find(|p| p.exists()).map(Path::to_path_buf);
+    let free_bytes = existing.and_then(|p| fs2::available_space(p).ok());
+    RecInfo { status, free_bytes }
+}
+
+#[tauri::command]
+fn open_recordings_folder(app: AppHandle, shared: State<'_, Shared>) -> Result<(), String> {
+    let dir = {
+        let mut state = shared.lock().unwrap();
+        ensure_init(&app, &mut state);
+        record_dir_of(&app, &state.settings)
+    };
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    std::process::Command::new("explorer").arg(&dir).spawn().map_err(|e| e.to_string())?;
+    #[cfg(not(windows))]
+    let _ = dir;
+    Ok(())
+}
+
 // ---------- favorites ----------
 
 fn visible_fav_slots(s: &Settings) -> Vec<usize> {
@@ -626,6 +783,13 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Shared::new(AppState::default()))
         .manage(ScanLock(Mutex::new(())))
+        .manage(Recorder::new())
+        .on_window_event(|window, event| {
+            // Closing the app mid-recording still finishes the WAV file properly.
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                window.app_handle().state::<Recorder>().stop();
+            }
+        })
         .manage(Engine::new(DEFAULT_COLUMNS * DEFAULT_ROWS, FAV_SLOTS))
         .setup(|app| {
             // Load saved favorites into memory in the background so they fire instantly.
@@ -655,6 +819,14 @@ fn main() {
             list_audio_devices,
             set_audio_device,
             get_audio_diagnostics,
+            get_record_settings,
+            list_input_devices,
+            set_record_device,
+            set_record_dir,
+            start_recording,
+            stop_recording,
+            get_rec_status,
+            open_recordings_folder,
             reload_favorites,
             get_layout,
             set_layout
@@ -681,6 +853,23 @@ mod tests {
             album: None,
             duration_secs: None,
         }
+    }
+
+    #[test]
+    fn recording_names_are_safe_and_never_overwrite() {
+        let dir = std::env::temp_dir().join(format!("rec-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        assert_eq!(clean_file_name("  Sermon: Part 1/2? "), "Sermon Part 1 2");
+        assert_eq!(clean_file_name("..."), "");
+        let p = recording_path(&dir, "", "2026-11-08 0930");
+        assert_eq!(p.file_name().unwrap(), "2026-11-08 0930.wav");
+        fs::write(&p, b"x").unwrap();
+        let p2 = recording_path(&dir, "Sermon", "2026-11-08 0930");
+        assert_eq!(p2.file_name().unwrap(), "2026-11-08 0930 Sermon.wav");
+        fs::write(&p2, b"x").unwrap();
+        let p3 = recording_path(&dir, "Sermon", "2026-11-08 0930");
+        assert_eq!(p3.file_name().unwrap(), "2026-11-08 0930 Sermon (2).wav");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

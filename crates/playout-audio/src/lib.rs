@@ -2,11 +2,13 @@
 
 pub mod decode;
 pub mod mixer;
+pub mod record;
 #[cfg(feature = "mf")]
 mod mf;
 
 pub use decode::{decode_file, Decoded};
 pub use mixer::Bank;
+pub use record::{list_input_devices, RecStatus, Recorder};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use mixer::Mixer;

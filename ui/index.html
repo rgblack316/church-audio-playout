@@ -42,6 +42,29 @@
   #audioBanner { display: none; background: #4a1f26; color: #ffd0d0; padding: .5rem 1rem;
                  border-bottom: 1px solid var(--line); align-items: center; gap: .75rem; }
 
+  /* ---- recording bar ---- */
+  #recBar { flex: none; display: flex; align-items: center; gap: .8rem; padding: .45rem 1rem; background: var(--bar);
+            border-bottom: 1px solid var(--line); min-width: 0; font-size: .85rem; }
+  #recBtn { display: flex; align-items: center; gap: .5rem; padding: .35rem 1rem; font-weight: 600; border-radius: .5rem;
+            background: transparent; border: 1.5px solid #ff7b7b; color: #ffb3b3; white-space: nowrap; }
+  #recBtn .dot { width: .7rem; height: .7rem; border-radius: 50%; background: #ff5a5a; }
+  #recBar.recording #recBtn { background: #6b1d26; color: #fff; }
+  #recBar.recording #recBtn .dot { border-radius: .12rem; background: #fff; }
+  #recBtn.confirm { background: #c0303d; color: #fff; animation: blink 1s steps(2, start) infinite; }
+  @keyframes blink { 50% { filter: brightness(1.35); } }
+  #recName { width: 14rem; max-width: 22%; padding: .3rem .6rem; font-size: .85rem; }
+  #recTime { font: 600 1.15rem "IBM Plex Mono", Consolas, monospace; color: var(--faint); min-width: 5.6rem; }
+  #recBar.recording #recTime { color: #ff9a9a; }
+  .meters { display: flex; flex-direction: column; gap: .2rem; width: clamp(7rem, 16vw, 16rem); flex: none; }
+  .meter { position: relative; height: .5rem; border-radius: .25rem; background: var(--panel2); overflow: hidden; }
+  .meter i { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: var(--good); }
+  .meter i.hot { background: var(--accent); }
+  .meter i.clip { background: var(--bad); }
+  .meter b { position: absolute; top: 0; bottom: 0; width: 2px; left: 0; background: #e9edf5; opacity: .85; }
+  #recInfo { flex: 1; min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #recInfo.err { color: #ffb3b3; }
+  #recInfo.warn { color: var(--accent); }
+  #recOpen { padding: .3rem .8rem; font-size: .82rem; background: transparent; white-space: nowrap; }
   main { flex: 1; display: flex; gap: 1rem; min-height: 0; padding: 1rem; }
 
   /* ---- library ---- */
@@ -173,6 +196,15 @@
 </header>
 <div id="audioBanner"><span id="audioMsg"></span><button id="retryAudio">Retry audio</button></div>
 
+<div id="recBar">
+  <button id="recBtn" aria-label="Start recording"><span class="dot"></span><span id="recBtnText">Record</span></button>
+  <input id="recName" type="text" placeholder="Name (optional), e.g. Sermon" aria-label="Recording name" maxlength="60">
+  <span id="recTime">00:00:00</span>
+  <div class="meters" aria-label="Recording level"><div class="meter"><i id="mL"></i><b id="mLh"></b></div><div class="meter"><i id="mR"></i><b id="mRh"></b></div></div>
+  <span id="recInfo">Ready to record</span>
+  <button id="recOpen">Open folder</button>
+</div>
+
 <main>
   <section id="library" aria-label="Song library">
     <div class="searchrow">
@@ -241,6 +273,19 @@
   <p class="small">Switching the output stops anything that is playing. If the chosen device is unplugged,
      the Windows default is used until it returns (press Retry audio).</p>
   <div class="err" id="deviceErr"></div>
+  <hr style="border-color: var(--line)">
+  <p><strong>Recording</strong></p>
+  <div class="row2">
+    <label>Input <select id="recInput"></select></label>
+    <button id="refreshInputs" title="Look for newly connected inputs">Refresh</button>
+  </div>
+  <div class="row2">
+    <label>Save to <input type="text" id="recDir" spellcheck="false" style="min-width:24rem"></label>
+    <button id="recDirPick">Choose…</button>
+  </div>
+  <p class="small">Recordings are saved as 24-bit WAV, named with the date and time. Use a folder that is not
+     synced by OneDrive. Windows is kept awake while recording.</p>
+  <div class="err" id="recErr"></div>
   <hr style="border-color: var(--line)">
   <label for="pattern"><strong>Page number pattern</strong></label>
   <p class="small">Regular expression with named groups <code>title</code> and <code>page</code>.
@@ -402,6 +447,7 @@ $('settings').addEventListener('click', async () => {
   $('layoutErr').textContent = '';
   $('deviceDiag').style.display = 'none';
   loadDevices();
+  loadRecordSettings();
   invoke('get_fade_secs').then((v) => { $('fadeSecs').value = v; }).catch(() => {});
   $('fadeErr').textContent = '';
   $('pattern').value = await invoke('get_page_pattern');
@@ -435,6 +481,136 @@ $('fadeSecs').addEventListener('change', async () => {
   }
 });
 $('refreshDevices').addEventListener('click', loadDevices);
+
+// ---------------- recording ----------------
+async function loadRecordSettings() {
+  $('recErr').textContent = '';
+  try {
+    const [r, rs] = await Promise.all([invoke('list_input_devices'), invoke('get_record_settings')]);
+    const sel = $('recInput');
+    sel.replaceChildren(new Option('System default input', ''));
+    for (const d of r.devices) sel.add(new Option(d.label, d.name));
+    if (r.selected && !r.devices.some((d) => d.name === r.selected)) sel.add(new Option(`${r.selected} (not connected)`, r.selected));
+    sel.value = r.selected || '';
+    $('recDir').value = rs.dir;
+  } catch (e) { $('recErr').textContent = String(e); }
+}
+$('recInput').addEventListener('change', () =>
+  invoke('set_record_device', { name: $('recInput').value || null }).catch((e) => { $('recErr').textContent = String(e); }));
+$('refreshInputs').addEventListener('click', loadRecordSettings);
+async function saveRecDir(path) {
+  $('recErr').textContent = '';
+  try { $('recDir').value = await invoke('set_record_dir', { path }); }
+  catch (e) { $('recErr').textContent = String(e); loadRecordSettings(); }
+}
+$('recDir').addEventListener('change', () => saveRecDir($('recDir').value));
+$('recDirPick').addEventListener('click', async () => {
+  const picked = await window.__TAURI__.dialog.open({ directory: true, title: 'Folder for recordings' });
+  if (picked) saveRecDir(picked);
+});
+
+const fmtClock = (sec) => {
+  const t = Math.floor(sec);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(Math.floor(t / 3600))}:${p(Math.floor(t / 60) % 60)}:${p(t % 60)}`;
+};
+const meterPct = (peak) => {
+  const db = peak > 0 ? 20 * Math.log10(peak) : -90;
+  return { db, pct: Math.max(0, Math.min(100, ((db + 60) / 60) * 100)) };
+};
+const held = { l: 0, r: 0 };
+let lastRecAt = performance.now();
+let confirmTimer = null;
+let recState = { recording: false };
+let recNote = null;   // a start/stop problem to keep on screen until the next attempt
+const baseName = (p) => (p || '').split(/[\\/]/).pop();
+
+function paintMeter(side, peak, dt) {
+  const { db, pct } = meterPct(peak);
+  // peak hold falls back at 25 dB per second
+  held[side] = Math.max(pct, held[side] - (dt * 25 * 100) / 60);
+  const bar = $(side === 'l' ? 'mL' : 'mR');
+  bar.style.width = `${pct}%`;
+  bar.className = db > -1 ? 'clip' : db > -9 ? 'hot' : '';
+  $(side === 'l' ? 'mLh' : 'mRh').style.left = `calc(${held[side]}% - 2px)`;
+}
+
+function renderRec(s) {
+  recState = s;
+  const now = performance.now();
+  const dt = Math.min(1, (now - lastRecAt) / 1000);
+  lastRecAt = now;
+  $('recBar').classList.toggle('recording', !!s.recording);
+  $('recName').disabled = !!s.recording;
+  $('recTime').textContent = fmtClock(s.recording ? s.elapsed_secs : s.path ? s.elapsed_secs : 0);
+  paintMeter('l', s.recording ? s.peak_l : 0, dt);
+  paintMeter('r', s.recording ? s.peak_r : 0, dt);
+  if (!s.recording) { $('recBtn').classList.remove('confirm'); }
+  $('recBtnText').textContent = s.recording ? ($('recBtn').classList.contains('confirm') ? 'Click again to stop' : 'Stop') : 'Record';
+  $('recBtn').setAttribute('aria-label', s.recording ? 'Stop recording' : 'Start recording');
+  const info = $('recInfo');
+  info.className = '';
+  const free = s.free_bytes;
+  const mb = (s.bytes / 1048576).toFixed(0);
+  if (recNote && !s.recording) {
+    info.className = 'err';
+    info.textContent = recNote;
+  } else if (s.error) {
+    info.className = 'err';
+    info.textContent = `${s.error}${s.path ? ` \u2014 saved so far: ${baseName(s.path)}` : ''}`;
+  } else if (s.recording) {
+    const secsLeft = free != null && s.sample_rate ? free / (s.sample_rate * 6) : null; // 2 channels x 3 bytes
+    let text = `${baseName(s.path)} \u00b7 ${mb} MB \u00b7 ${s.device}`;
+    if (secsLeft != null) {
+      text += ` \u00b7 disk full in about ${secsLeft >= 3600 ? (secsLeft / 3600).toFixed(1) + ' h' : Math.floor(secsLeft / 60) + ' min'}`;
+      if (secsLeft < 3600) info.className = 'warn';
+    }
+    info.textContent = text;
+  } else if (s.path) {
+    info.textContent = `Saved ${baseName(s.path)} (${fmtClock(s.elapsed_secs)}, ${mb} MB)`;
+  } else {
+    info.textContent = free != null ? `Ready to record \u00b7 ${(free / 1073741824).toFixed(0)} GB free` : 'Ready to record';
+  }
+}
+
+let recPolling = false;
+async function pollRec() {
+  if (recPolling) return;
+  recPolling = true;
+  try { renderRec(await invoke('get_rec_status')); } catch (e) { /* app closing */ }
+  recPolling = false;
+}
+
+$('recBtn').addEventListener('click', async () => {
+  const btn = $('recBtn');
+  if (!recState.recording) {
+    recNote = null;
+    $('recInfo').className = '';
+    $('recInfo').textContent = 'Starting\u2026';
+    try {
+      await invoke('start_recording', { name: $('recName').value.trim() || null });
+    } catch (e) {
+      recNote = String(e);
+      renderRec(recState);
+      return;
+    }
+    await pollRec();
+    return;
+  }
+  // Stopping needs a second click, so a stray click cannot end a service recording.
+  if (!btn.classList.contains('confirm')) {
+    btn.classList.add('confirm');
+    clearTimeout(confirmTimer);
+    confirmTimer = setTimeout(() => { btn.classList.remove('confirm'); pollRec(); }, 4000);
+    pollRec();
+    return;
+  }
+  clearTimeout(confirmTimer);
+  btn.classList.remove('confirm');
+  try { await invoke('stop_recording'); } catch (e) { $('recInfo').textContent = String(e); }
+  await pollRec();
+});
+$('recOpen').addEventListener('click', () => invoke('open_recordings_folder').catch(showError));
 $('deviceInfo').addEventListener('click', async () => {
   const pre = $('deviceDiag');
   try { pre.textContent = await invoke('get_audio_diagnostics'); }
@@ -789,6 +965,7 @@ function watchTags() {
   layout = await invoke('get_layout');
   applyLayoutUi();
   setInterval(pollPads, 100);
+  setInterval(pollRec, 100);
   const s = await invoke('get_state');
   haveFolder = !!s.music_dir;
   applySummary(s);
