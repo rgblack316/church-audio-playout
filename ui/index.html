@@ -653,6 +653,7 @@ $('deviceInfo').addEventListener('click', async () => {
   try { pre.textContent = await invoke('get_audio_diagnostics'); }
   catch (e) { pre.textContent = String(e); }
   pre.style.display = 'block';
+  try { await navigator.clipboard.writeText(pre.textContent); pre.textContent += '\n(Copied to the clipboard \u2014 paste it into a message.)'; } catch (e) { /* select manually */ }
 });
 $('readTags').addEventListener('change', async () => {
   $('tagsErr').textContent = '';

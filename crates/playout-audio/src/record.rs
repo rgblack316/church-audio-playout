@@ -338,6 +338,16 @@ fn open_input(
             .ok_or_else(|| format!("Input device \"{n}\" was not found"))?,
         None => host.default_input_device().ok_or("No audio input device found")?,
     };
+    open_input_device(device, first, tx, shared, stop)
+}
+
+fn open_input_device(
+    device: cpal::Device,
+    first: usize,
+    tx: Sender<Vec<f32>>,
+    shared: Arc<Shared>,
+    stop: Sender<()>,
+) -> Result<(cpal::Stream, String, u32), String> {
     let default = device.default_input_config().map_err(|e| format!("Could not read the input format: {e}"))?;
     let needed = (first + 2) as u16;
     let supported = if default.channels() >= needed || first == 0 {
@@ -408,6 +418,63 @@ where
             None,
         )
         .map_err(|e| input_error(&e.to_string()))
+}
+
+/// Text report of every recording input: formats Windows offers, and (with `trial`) the real
+/// result of opening each one for a moment.
+pub fn describe_inputs(trial: bool) -> String {
+    let host = cpal::default_host();
+    let default = host.default_input_device().and_then(|d| d.name().ok()).unwrap_or_else(|| "none".into());
+    let mut out = format!("Recording inputs. System default input: {default}\n");
+    let devices = match host.input_devices() {
+        Ok(d) => d,
+        Err(e) => return format!("{out}Could not list inputs: {e}\n"),
+    };
+    for (i, d) in devices.enumerate() {
+        let name = d.name().unwrap_or_else(|e| format!("(unnamed: {e})"));
+        out.push_str(&format!("\n[{}] {name}\n", i + 1));
+        match d.default_input_config() {
+            Ok(c) => out.push_str(&format!("  default: {} ch, {} Hz, {:?}\n", c.channels(), c.sample_rate().0, c.sample_format())),
+            Err(e) => out.push_str(&format!("  default format unavailable: {e}\n")),
+        }
+        if let Ok(cfgs) = d.supported_input_configs() {
+            for c in cfgs.take(4) {
+                out.push_str(&format!(
+                    "  offers: {} ch, {}-{} Hz, {:?}\n",
+                    c.channels(),
+                    c.min_sample_rate().0,
+                    c.max_sample_rate().0,
+                    c.sample_format()
+                ));
+            }
+        }
+        if trial {
+            let (tx, _rx) = channel::<Vec<f32>>();
+            let (stop, _stop_rx) = channel::<()>();
+            let shared = Arc::new(Shared {
+                running: AtomicBool::new(true),
+                frames: AtomicU64::new(0),
+                bytes: AtomicU64::new(0),
+                peak_l: AtomicU32::new(0),
+                peak_r: AtomicU32::new(0),
+                error: Mutex::new(None),
+                path: Mutex::new(PathBuf::new()),
+            });
+            // Open by index among input devices, so same-named devices are told apart.
+            let result = match open_input_device(d, 0, tx, shared, stop) {
+                Ok((stream, _, _)) => match stream.play() {
+                    Ok(()) => {
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                        "opens and starts fine".to_string()
+                    }
+                    Err(e) => format!("play failed: {e}"),
+                },
+                Err(e) => format!("open failed: {e}"),
+            };
+            out.push_str(&format!("  test: {result}\n"));
+        }
+    }
+    out
 }
 
 /// Plain-language version of the common Windows audio errors.

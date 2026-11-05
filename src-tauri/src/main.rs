@@ -485,8 +485,15 @@ fn list_audio_devices(app: AppHandle, shared: State<'_, Shared>) -> AudioDevices
 
 /// Text listing every device the system reports (for troubleshooting a missing output).
 #[tauri::command(async)]
-fn get_audio_diagnostics() -> String {
-    playout_audio::describe_devices()
+fn get_audio_diagnostics(recorder: State<'_, Recorder>) -> String {
+    let recording = recorder.is_recording();
+    let mut text = playout_audio::describe_devices();
+    text.push('\n');
+    text.push_str(&playout_audio::describe_inputs(!recording));
+    if recording {
+        text.push_str("\n(Inputs were not test-opened because a recording is running.)\n");
+    }
+    text
 }
 
 /// Switch the output device (None = system default). Stops anything playing.
