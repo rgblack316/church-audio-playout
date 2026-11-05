@@ -24,7 +24,7 @@ jobs:
           node-version: 22
 
       - name: Run tests
-        run: cargo test -p playout-core -p playout-audio
+        run: cargo test -p playout-core -p playout-audio -- --test-threads=1 --nocapture
 
       - name: Install Tauri CLI (prebuilt)
         run: npm install -g @tauri-apps/cli@^2

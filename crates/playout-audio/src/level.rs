@@ -149,6 +149,54 @@ impl WavFrames {
     }
 }
 
+/// 4x oversampling peak meter (windowed-sinc, 24 taps), in safe code. It replaces the
+/// true-peak mode of the loudness crate, whose stereo interpolator crashed on Windows.
+struct TruePeak {
+    taps: [[f32; 12]; 4],
+    hist: Vec<[f32; 12]>,
+    peak: f32,
+}
+
+impl TruePeak {
+    fn new(ch: usize) -> Self {
+        let mut taps = [[0f32; 12]; 4];
+        for (phase, row) in taps.iter_mut().enumerate() {
+            let frac = phase as f64 / 4.0;
+            let mut sum = 0.0;
+            for (k, t) in row.iter_mut().enumerate() {
+                // tap k weights the sample k-5 positions before the interpolation point
+                let x = (5.0 - k as f64) + frac - 0.0;
+                let sinc = if x.abs() < 1e-9 { 1.0 } else { (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x) };
+                let w = 0.5 + 0.5 * (std::f64::consts::PI * x / 6.0).cos();
+                let v = sinc * if x.abs() <= 6.0 { w } else { 0.0 };
+                *t = v as f32;
+                sum += v;
+            }
+            for t in row.iter_mut() {
+                *t = (*t as f64 / sum) as f32;
+            }
+        }
+        Self { taps, hist: vec![[0.0; 12]; ch], peak: 0.0 }
+    }
+
+    fn add(&mut self, frames: &[f32]) {
+        let ch = self.hist.len();
+        for frame in frames.chunks_exact(ch) {
+            for (c, &x) in frame.iter().enumerate() {
+                let h = &mut self.hist[c];
+                h.rotate_left(1);
+                h[11] = x;
+                self.peak = self.peak.max(x.abs());
+                // h[11] is the newest sample; the interpolation point sits between h[5] and h[6]
+                for row in &self.taps {
+                    let v: f32 = row.iter().zip(h.iter()).map(|(t, s)| t * s).sum();
+                    self.peak = self.peak.max(v.abs());
+                }
+            }
+        }
+    }
+}
+
 fn to_db(linear: f64) -> f64 {
     if linear > 0.0 {
         20.0 * linear.log10()
@@ -195,10 +243,12 @@ pub fn level_wav(
     let out_spec = hound::WavSpec { channels: ch as u16, sample_rate: spec.sample_rate, bits_per_sample: 24, sample_format: hound::SampleFormat::Int };
     let temp = output.with_extension("wav.part");
     let mut writer = hound::WavWriter::create(&temp, out_spec).map_err(|e| format!("Could not create {}: {e}", output.display()))?;
-    let mut check = EbuR128::new(ch as u32, spec.sample_rate, Mode::I | Mode::TRUE_PEAK).map_err(|e| format!("Loudness meter: {e}"))?;
+    let mut check = EbuR128::new(ch as u32, spec.sample_rate, Mode::I).map_err(|e| format!("Loudness meter: {e}"))?;
+    let mut tp = TruePeak::new(ch);
     let mut limiter = Limiter::new(ch, spec.sample_rate);
     let mut out: Vec<f32> = Vec::new();
-    let write = |samples: &[f32], writer: &mut hound::WavWriter<_>, check: &mut EbuR128| -> Result<(), String> {
+    let mut write = |samples: &[f32], writer: &mut hound::WavWriter<_>, check: &mut EbuR128| -> Result<(), String> {
+        tp.add(samples);
         check.add_frames_f32(samples).map_err(|e| format!("Loudness meter: {e}"))?;
         for s in samples {
             writer
@@ -225,7 +275,7 @@ pub fn level_wav(
     std::fs::rename(&temp, output).map_err(|e| format!("Could not save {}: {e}", output.display()))?;
 
     let final_lufs = check.loudness_global().unwrap_or(f64::NEG_INFINITY);
-    let peak = (0..ch as u32).filter_map(|c| check.true_peak(c).ok()).fold(0.0f64, f64::max);
+    let peak = tp.peak as f64;
     progress(1.0);
     Ok(LevelReport {
         output: output.to_path_buf(),
@@ -266,6 +316,15 @@ mod tests {
             }
         }
         w.finalize().unwrap();
+    }
+
+    #[test]
+    fn true_peak_meter_sees_peaks_between_samples() {
+        // fs/4 sine at 45 degrees: every sample is +-0.707 but the waveform reaches 1.0
+        let data: Vec<f32> = (0..400).map(|i| (std::f32::consts::FRAC_PI_2 * i as f32 + std::f32::consts::FRAC_PI_4).sin()).collect();
+        let mut tp = TruePeak::new(1);
+        tp.add(&data);
+        assert!(tp.peak > 0.97 && tp.peak < 1.03, "true peak {}", tp.peak);
     }
 
     #[test]
