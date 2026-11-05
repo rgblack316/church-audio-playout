@@ -525,7 +525,7 @@ fn clean_file_name(name: &str) -> String {
     cleaned.trim_matches('.').chars().take(80).collect::<String>().trim().to_string()
 }
 
-/// `<dir>/2026-11-08 0930 Sermon.wav`; a number is added if that file already exists.
+/// `<dir>/11-08-2026 Sermon.wav`; a number is added if that file already exists.
 fn recording_path(dir: &Path, name: &str, stamp: &str) -> PathBuf {
     let name = clean_file_name(name);
     let base = if name.is_empty() { stamp.to_string() } else { format!("{stamp} {name}") };
@@ -615,7 +615,7 @@ fn start_recording(
         (record_dir_of(&app, &state.settings), state.settings.record_device.clone())
     };
     fs::create_dir_all(&dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
-    let stamp = chrono::Local::now().format("%Y-%m-%d %H%M").to_string();
+    let stamp = chrono::Local::now().format("%m-%d-%Y").to_string();
     let path = recording_path(&dir, name.as_deref().unwrap_or(""), &stamp);
     recorder.start(device.as_deref(), path.clone())?;
     Ok(path.display().to_string())
@@ -984,14 +984,14 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         assert_eq!(clean_file_name("  Sermon: Part 1/2? "), "Sermon Part 1 2");
         assert_eq!(clean_file_name("..."), "");
-        let p = recording_path(&dir, "", "2026-11-08 0930");
-        assert_eq!(p.file_name().unwrap(), "2026-11-08 0930.wav");
+        let p = recording_path(&dir, "", "11-08-2026");
+        assert_eq!(p.file_name().unwrap(), "11-08-2026.wav");
         fs::write(&p, b"x").unwrap();
-        let p2 = recording_path(&dir, "Sermon", "2026-11-08 0930");
-        assert_eq!(p2.file_name().unwrap(), "2026-11-08 0930 Sermon.wav");
+        let p2 = recording_path(&dir, "Sermon", "11-08-2026");
+        assert_eq!(p2.file_name().unwrap(), "11-08-2026 Sermon.wav");
         fs::write(&p2, b"x").unwrap();
-        let p3 = recording_path(&dir, "Sermon", "2026-11-08 0930");
-        assert_eq!(p3.file_name().unwrap(), "2026-11-08 0930 Sermon (2).wav");
+        let p3 = recording_path(&dir, "Sermon", "11-08-2026");
+        assert_eq!(p3.file_name().unwrap(), "11-08-2026 Sermon (2).wav");
         let _ = fs::remove_dir_all(&dir);
     }
 
