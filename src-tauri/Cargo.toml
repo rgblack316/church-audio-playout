@@ -16,6 +16,7 @@ playout-core = { path = "../crates/playout-core" }
 playout-audio = { path = "../crates/playout-audio" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 fs2 = "0.4"
+ureq = { version = "2", default-features = false, features = [] }
 
 # Windows Media Foundation fallback decoder (WMA etc.) only exists on Windows.
 [target.'cfg(windows)'.dependencies]

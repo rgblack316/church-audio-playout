@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod hook;
 use playout_core::{
     read_pending, scan_quick, Library, MetaCache, Pending, Problem, Query, ScanOptions, Track, DEFAULT_PAGE_PATTERN,
 };
@@ -52,6 +53,21 @@ struct Settings {
     /// Loudness target for leveling, in LUFS.
     #[serde(default = "default_target_lufs")]
     target_lufs: f64,
+    /// Tell Sanctuary Screens which hymn is playing.
+    #[serde(default)]
+    hook_enabled: bool,
+    /// Address of Sanctuary Screens, e.g. http://192.168.1.50:8091.
+    #[serde(default)]
+    hook_url: String,
+    /// Webhook token (kept in the settings file; never sent back to the screen or logged).
+    #[serde(default)]
+    hook_token: String,
+    /// Tell the display to return to idle when a song ends.
+    #[serde(default = "default_overlap")]
+    hook_clear_on_end: bool,
+    /// "Local songbook = Name in Sanctuary Screens", one per line.
+    #[serde(default)]
+    hook_songbook_map: String,
     /// Chosen audio output device (None = the Windows default).
     #[serde(default)]
     audio_device: Option<String>,
@@ -65,6 +81,33 @@ struct Favorite {
     path: String,
     title: String,
     sub: String,
+    /// Song details for the Sanctuary Screens hook (songbook, title, page).
+    #[serde(default)]
+    song: Option<(String, String, String)>,
+}
+
+/// Songbook, title and page of a track, if it has all three (what the display needs).
+fn song_of(track: &Track) -> Option<hook::Song> {
+    let page = track.page?;
+    let songbook = track.songbook.trim();
+    (!songbook.is_empty()).then(|| hook::Song { songbook: songbook.to_string(), title: pad_label(track), page: page.to_string() })
+}
+
+/// Song info by pad, for the Sanctuary Screens hook.
+struct PadSongs(Mutex<std::collections::HashMap<hook::PadKey, hook::Song>>);
+
+fn set_pad_song(app: &AppHandle, bank: Bank, pad: usize, song: Option<hook::Song>) {
+    let songs = app.state::<PadSongs>();
+    let mut map = songs.0.lock().unwrap();
+    let key = (bank == Bank::Fav, pad);
+    match song {
+        Some(s) => {
+            map.insert(key, s);
+        }
+        None => {
+            map.remove(&key);
+        }
+    }
 }
 
 fn default_fav_rows() -> usize {
@@ -106,6 +149,11 @@ impl Default for Settings {
             record_dir: None,
             record_device: None,
             audio_device: None,
+            hook_enabled: false,
+            hook_url: String::new(),
+            hook_token: String::new(),
+            hook_clear_on_end: true,
+            hook_songbook_map: String::new(),
             auto_level: true,
             target_lufs: default_target_lufs(),
             favorites: vec![None; FAV_SLOTS],
@@ -387,6 +435,7 @@ fn load_pad(
     };
     let sub = pad_sub(&track);
     engine.load(bank, pad, Arc::new(decoded), pad_label(&track), sub.clone())?;
+    set_pad_song(&app, bank, pad, song_of(&track));
     if bank == Bank::Fav {
         let mut state = shared.lock().unwrap();
         ensure_init(&app, &mut state);
@@ -394,6 +443,7 @@ fn load_pad(
             path: track.path.clone(),
             title: pad_label(&track),
             sub,
+            song: song_of(&track).map(|s| (s.songbook, s.title, s.page)),
         });
         save_settings(&app, &state.settings)?;
     }
@@ -455,6 +505,7 @@ fn clear_pad(
     pad: usize,
 ) -> Result<(), String> {
     engine.clear(bank, pad)?;
+    set_pad_song(&app, bank, pad, None);
     if bank == Bank::Fav {
         let mut state = shared.lock().unwrap();
         ensure_init(&app, &mut state);
@@ -740,6 +791,140 @@ fn get_level_status(job: State<'_, LevelJob>) -> LevelStatus {
     job.0.lock().unwrap().clone()
 }
 
+// ---------- Sanctuary Screens hook ----------
+
+#[derive(Serialize)]
+struct HookSettings {
+    enabled: bool,
+    url: String,
+    has_token: bool,
+    clear_on_end: bool,
+    songbook_map: String,
+}
+
+#[tauri::command]
+fn get_hook_settings(app: AppHandle, shared: State<'_, Shared>) -> HookSettings {
+    let mut state = shared.lock().unwrap();
+    ensure_init(&app, &mut state);
+    let s = &state.settings;
+    HookSettings {
+        enabled: s.hook_enabled,
+        url: s.hook_url.clone(),
+        has_token: !s.hook_token.is_empty(),
+        clear_on_end: s.hook_clear_on_end,
+        songbook_map: s.hook_songbook_map.clone(),
+    }
+}
+
+/// `token` None keeps the saved token; Some("") removes it.
+#[tauri::command]
+fn set_hook_settings(
+    app: AppHandle,
+    shared: State<'_, Shared>,
+    enabled: bool,
+    url: String,
+    token: Option<String>,
+    clear_on_end: bool,
+    songbook_map: String,
+) -> Result<(), String> {
+    let url = url.trim().to_string();
+    if enabled {
+        hook::endpoint(&url)?;
+    }
+    let mut state = shared.lock().unwrap();
+    ensure_init(&app, &mut state);
+    let s = &mut state.settings;
+    if let Some(t) = token {
+        s.hook_token = t.trim().to_string();
+    }
+    if enabled && s.hook_token.is_empty() {
+        return Err("Paste the token from Sanctuary Screens (Settings > Playout)".into());
+    }
+    s.hook_enabled = enabled;
+    s.hook_url = url;
+    s.hook_clear_on_end = clear_on_end;
+    s.hook_songbook_map = songbook_map;
+    save_settings(&app, &state.settings)
+}
+
+/// Check the address and token without changing the display (a guarded "clear").
+#[tauri::command(async)]
+fn hook_test(app: AppHandle, shared: State<'_, Shared>, url: String, token: Option<String>) -> Result<String, String> {
+    let (saved_url, saved_token) = {
+        let mut state = shared.lock().unwrap();
+        ensure_init(&app, &mut state);
+        (state.settings.hook_url.clone(), state.settings.hook_token.clone())
+    };
+    let url = if url.trim().is_empty() { saved_url } else { url };
+    let token = token.filter(|t| !t.trim().is_empty()).unwrap_or(saved_token);
+    if token.is_empty() {
+        return Err("Paste the token first".into());
+    }
+    let job = hook::Job { url: hook::endpoint(&url)?, token: token.trim().to_string(), body: hook::clear_if_hymn_body(), label: "test" };
+    hook::post(&job).map(|_| "Connected. The display was not changed.".to_string())
+}
+
+#[tauri::command]
+fn get_hook_status(hook: State<'_, hook::Hook>) -> hook::HookStatus {
+    hook.status()
+}
+
+/// Step the display: "next", "prev" or "clear".
+#[tauri::command]
+fn hook_action(app: AppHandle, shared: State<'_, Shared>, hook: State<'_, hook::Hook>, action: String) -> Result<(), String> {
+    if !matches!(action.as_str(), "next" | "prev" | "clear") {
+        return Err("Unknown display action".into());
+    }
+    let mut state = shared.lock().unwrap();
+    ensure_init(&app, &mut state);
+    let s = &state.settings;
+    if !s.hook_enabled {
+        return Err("Turn on the Sanctuary Screens connection in Settings first".into());
+    }
+    let url = hook::endpoint(&s.hook_url)?;
+    hook.send(hook::Job { url, token: s.hook_token.clone(), body: serde_json::json!({ "action": action }), label: "step" });
+    Ok(())
+}
+
+/// Watches which pads are playing and tells the display (see hook.rs).
+fn run_hook_watcher(app: AppHandle) {
+    let mut tracker = hook::Tracker::default();
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let (enabled, url, token, clear_on_end, map) = {
+            let shared = app.state::<Shared>();
+            let state = shared.lock().unwrap();
+            let s = &state.settings;
+            (s.hook_enabled, s.hook_url.clone(), s.hook_token.clone(), s.hook_clear_on_end, s.hook_songbook_map.clone())
+        };
+        if !enabled {
+            tracker = hook::Tracker::default();
+            continue;
+        }
+        let snap = app.state::<Engine>().snapshot();
+        let mut playing = std::collections::HashSet::new();
+        for p in snap.pads.iter().filter(|p| p.playing) {
+            playing.insert((false, p.index));
+        }
+        for p in snap.favs.iter().filter(|p| p.playing) {
+            playing.insert((true, p.index));
+        }
+        let songs = app.state::<PadSongs>().0.lock().unwrap().clone();
+        let Ok(url) = hook::endpoint(&url) else { continue };
+        let hook_handle = app.state::<hook::Hook>();
+        for action in tracker.update(&playing, &songs, clear_on_end, std::time::Instant::now()) {
+            let (body, label) = match action {
+                hook::Action::Hymn(mut song) => {
+                    song.songbook = hook::map_songbook(&map, &song.songbook);
+                    (hook::hymn_body(&song), "hymn")
+                }
+                hook::Action::ClearIfHymn => (hook::clear_if_hymn_body(), "clear"),
+            };
+            hook_handle.send(hook::Job { url: url.clone(), token: token.clone(), body, label });
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct RecInfo {
     #[serde(flatten)]
@@ -817,6 +1002,9 @@ fn preload_favorites(app: &AppHandle) {
                             .is_err()
                         {
                             engine.set_loading(Bank::Fav, *slot, false);
+                        } else {
+                            let song = fav.song.clone().map(|(songbook, title, page)| hook::Song { songbook, title, page });
+                            set_pad_song(app, Bank::Fav, *slot, song);
                         }
                     }
                     Err(e) => engine.set_error(Bank::Fav, *slot, fav.title.clone(), e),
@@ -910,6 +1098,8 @@ fn main() {
         .manage(Shared::new(AppState::default()))
         .manage(ScanLock(Mutex::new(())))
         .manage(Recorder::new())
+        .manage(hook::Hook::new())
+        .manage(PadSongs(Mutex::new(Default::default())))
         .manage(LevelJob(Mutex::new(LevelStatus { state: "idle", ..Default::default() })))
         .on_window_event(|window, event| {
             // Closing the app mid-recording still finishes the WAV file properly.
@@ -922,6 +1112,8 @@ fn main() {
             // Load saved favorites into memory in the background so they fire instantly.
             let handle = app.handle().clone();
             std::thread::spawn(move || preload_favorites(&handle));
+            let watcher = app.handle().clone();
+            std::thread::spawn(move || run_hook_watcher(watcher));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -949,6 +1141,11 @@ fn main() {
             get_record_settings,
             list_input_devices,
             set_record_device,
+            get_hook_settings,
+            set_hook_settings,
+            hook_test,
+            get_hook_status,
+            hook_action,
             get_level_settings,
             set_level_settings,
             get_level_status,
@@ -1028,7 +1225,7 @@ mod tests {
     #[test]
     fn favorites_round_trip_and_visible_slots_follow_columns() {
         let mut s = Settings::default();
-        s.favorites[9] = Some(Favorite { path: "/m/A 5.mp3".into(), title: "A".into(), sub: "Book \u{b7} p. 5".into() });
+        s.favorites[9] = Some(Favorite { path: "/m/A 5.mp3".into(), title: "A".into(), sub: "Book \u{b7} p. 5".into(), song: Some(("Book".into(), "A".into(), "5".into())) });
         let json = serde_json::to_string(&s).unwrap();
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.favorites.len(), FAV_SLOTS);

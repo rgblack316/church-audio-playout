@@ -17,7 +17,7 @@
   body { margin: 0; background: var(--bg); color: var(--text);
          font: 1rem/1.4 "IBM Plex Sans", "Segoe UI", system-ui, sans-serif; display: flex;
          flex-direction: column; height: 100vh; overflow: hidden; }
-  button, select, input { font: inherit; color: var(--text); background: var(--panel2);
+  button, select, input, textarea { font: inherit; color: var(--text); background: var(--panel2);
          border: 1px solid var(--line); border-radius: .5rem; padding: .4rem .75rem; }
   button { cursor: pointer; }
   button:hover:not(:disabled) { border-color: var(--accent); }
@@ -34,6 +34,13 @@
   #folderPill { flex: 0 1 22rem; }
   #devicePill { flex: 0 1 24rem; color: #c4cddf; }
   .grow { flex: 1; min-width: 0; }
+  #hookGroup { display: none; align-items: center; gap: .35rem; }
+  #hookGroup.on { display: flex; }
+  #hookDot { width: .6rem; height: .6rem; border-radius: 50%; background: #5b6579; flex: none; }
+  #hookDot.ok { background: #3dd68c; }
+  #hookDot.bad { background: #ff7b7b; }
+  #hookPill { padding: .3rem .6rem; font-size: .78rem; }
+  #hookGroup button { padding: .35rem .6rem; }
   header .stopall { background: #3a1a20; border: 1.5px solid var(--bad); color: #ffb3b3; font-weight: 600; font-size: .95rem; padding: .4rem 1.1rem; }
   header .fadeall { border: 1.5px solid var(--accent); color: var(--accent); font-weight: 600; font-size: .95rem; padding: .4rem 1.1rem; }
   header .iconbtn { width: 2.3rem; height: 2.3rem; padding: 0; display: flex; align-items: center; justify-content: center; }
@@ -174,7 +181,8 @@
            border-radius: .75rem; width: min(46rem, 92vw); max-height: 90vh; overflow-y: auto; }
   dialog::backdrop { background: rgba(0,0,0,.6); }
   dialog h2 { margin-top: 0; }
-  dialog input[type=text] { width: 100%; font-family: Consolas, monospace; }
+  dialog input[type=text], dialog input[type=password] { width: 100%; font-family: Consolas, monospace; }
+  dialog textarea { font-family: Consolas, monospace; }
   input[type=number] { width: 5rem; }
   .row2 { display: flex; gap: 1rem; align-items: center; margin: .5rem 0; flex-wrap: wrap; }
   .small { color: var(--muted); font-size: .82rem; }
@@ -190,6 +198,12 @@
   <button id="rescan">Rescan</button>
   <div class="grow"></div>
   <div class="pill" id="devicePill"><svg viewBox="0 0 24 24" fill="none" stroke="#3dd68c" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/></svg><span id="device">Audio starting…</span></div>
+  <div id="hookGroup" title="Sanctuary Screens display">
+    <div class="pill" id="hookPill"><span id="hookDot"></span><span id="hookText">Screens</span></div>
+    <button id="hookPrev" aria-label="Previous slide on the display" title="Previous slide">&#9664;</button>
+    <button id="hookNext" aria-label="Next slide on the display" title="Next slide">&#9654;</button>
+    <button id="hookClear" aria-label="Clear the display" title="Return the display to idle">Clear</button>
+  </div>
   <button id="fadeAll" class="fadeall" title="Fade out everything that is playing">Fade all</button>
   <button id="stopAll" class="stopall">Stop all</button>
   <button id="settings" class="iconbtn" aria-label="Settings" title="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
@@ -299,6 +313,23 @@
   <p class="small">Recordings are saved as 24-bit WAV, named with the date and time. Use a folder that is not
      synced by OneDrive. Windows is kept awake while recording.</p>
   <div class="err" id="recErr"></div>
+  <hr style="border-color: var(--line)">
+  <p><strong>Sanctuary Screens</strong></p>
+  <label><input type="checkbox" id="hookOn"> Show the playing hymn on the Sanctuary Screens display</label>
+  <div class="row2">
+    <label>Address <input type="text" id="hookUrl" spellcheck="false" placeholder="http://192.168.1.50:8091" style="min-width:20rem"></label>
+  </div>
+  <div class="row2">
+    <label>Token <input type="password" id="hookToken" autocomplete="off" spellcheck="false" placeholder="Paste the token" style="min-width:20rem"></label>
+    <button id="hookTest">Send test</button>
+  </div>
+  <label><input type="checkbox" id="hookClearOn"> Return display to idle when a song ends</label>
+  <p class="small">Songbook names that differ from Sanctuary Screens (one per line, <code>Our folder = Their name</code>):</p>
+  <textarea id="hookMap" rows="3" spellcheck="false" style="width:100%" placeholder="Hymnal = Baptist Hymnal"></textarea>
+  <p class="small">Sends the songbook, title and page when a song starts. The test only checks the address and
+     token; it does not change the display. Get the token in Sanctuary Screens under Settings &gt; Playout.</p>
+  <div class="err" id="hookErr"></div>
+  <div class="small" id="hookOk"></div>
   <hr style="border-color: var(--line)">
   <label for="pattern"><strong>Page number pattern</strong></label>
   <p class="small">Regular expression with named groups <code>title</code> and <code>page</code>.
@@ -461,6 +492,7 @@ $('settings').addEventListener('click', async () => {
   $('deviceDiag').style.display = 'none';
   loadDevices();
   loadRecordSettings();
+  loadHookSettings();
   invoke('get_fade_secs').then((v) => { $('fadeSecs').value = v; }).catch(() => {});
   $('fadeErr').textContent = '';
   $('pattern').value = await invoke('get_page_pattern');
@@ -531,6 +563,62 @@ $('recDirPick').addEventListener('click', async () => {
   const picked = await window.__TAURI__.dialog.open({ directory: true, title: 'Folder for recordings' });
   if (picked) saveRecDir(picked);
 });
+
+let hookOn = false;
+async function loadHookSettings() {
+  $('hookErr').textContent = ''; $('hookOk').textContent = '';
+  try {
+    const h = await invoke('get_hook_settings');
+    $('hookOn').checked = h.enabled;
+    $('hookUrl').value = h.url;
+    $('hookToken').value = '';
+    $('hookToken').placeholder = h.has_token ? 'Token saved (type to replace)' : 'Paste the token';
+    $('hookClearOn').checked = h.clear_on_end;
+    $('hookMap').value = h.songbook_map;
+    setHookOn(h.enabled);
+  } catch (e) { $('hookErr').textContent = String(e); }
+}
+function setHookOn(on) {
+  hookOn = !!on;
+  $('hookGroup').classList.toggle('on', hookOn);
+}
+async function saveHook() {
+  $('hookErr').textContent = ''; $('hookOk').textContent = '';
+  const token = $('hookToken').value.trim();
+  try {
+    await invoke('set_hook_settings', {
+      enabled: $('hookOn').checked, url: $('hookUrl').value, token: token ? token : null,
+      clearOnEnd: $('hookClearOn').checked, songbookMap: $('hookMap').value,
+    });
+    setHookOn($('hookOn').checked);
+    if (token) { $('hookToken').value = ''; $('hookToken').placeholder = 'Token saved (type to replace)'; }
+  } catch (e) {
+    $('hookErr').textContent = String(e);
+    $('hookOn').checked = false;
+    setHookOn(false);
+    try { await invoke('set_hook_settings', { enabled: false, url: $('hookUrl').value, token: token ? token : null, clearOnEnd: $('hookClearOn').checked, songbookMap: $('hookMap').value }); } catch (e2) { /* keep the first message */ }
+  }
+}
+for (const id of ['hookOn', 'hookUrl', 'hookToken', 'hookClearOn', 'hookMap']) $(id).addEventListener('change', saveHook);
+$('hookTest').addEventListener('click', async () => {
+  $('hookErr').textContent = ''; $('hookOk').textContent = 'Testing\u2026';
+  try {
+    $('hookOk').textContent = await invoke('hook_test', { url: $('hookUrl').value, token: $('hookToken').value.trim() || null });
+  } catch (e) { $('hookOk').textContent = ''; $('hookErr').textContent = String(e); }
+});
+for (const [id, action] of [['hookPrev', 'prev'], ['hookNext', 'next'], ['hookClear', 'clear']]) {
+  $(id).addEventListener('click', () => invoke('hook_action', { action }).catch(showError));
+}
+async function pollHook() {
+  if (!hookOn) return;
+  try {
+    const st = await invoke('get_hook_status');
+    const dot = $('hookDot');
+    dot.className = st.ok === true ? 'ok' : st.ok === false ? 'bad' : '';
+    $('hookText').textContent = st.ok === false ? 'Screens: problem' : 'Screens';
+    $('hookPill').title = st.ok == null ? 'Sanctuary Screens: nothing sent yet' : `Sanctuary Screens: ${st.message}`;
+  } catch (e) { /* closing */ }
+}
 
 const fmtClock = (sec) => {
   const t = Math.floor(sec);
@@ -1005,6 +1093,8 @@ function watchTags() {
   applyLayoutUi();
   setInterval(pollPads, 100);
   setInterval(pollRec, 100);
+  setInterval(pollHook, 1000);
+  loadHookSettings();
   const s = await invoke('get_state');
   haveFolder = !!s.music_dir;
   applySummary(s);
