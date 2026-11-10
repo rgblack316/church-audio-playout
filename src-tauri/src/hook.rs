@@ -104,6 +104,19 @@ fn describe(label: &str, status: u16, body: &Value) -> Result<String, String> {
     }
 }
 
+/// Add what was sent (for a hymn) and the server's own explanation to a failure message.
+fn with_context(job: &Job, body: &Value, msg: String) -> String {
+    let mut out = msg;
+    if job.label == "hymn" {
+        let g = |k: &str| job.body.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        out.push_str(&format!(" [sent: {} / {} / p. {}]", g("songbook"), g("title"), g("page")));
+    }
+    if let Some(d) = body.get("detail").and_then(Value::as_str) {
+        out.push_str(&format!(" ({d})"));
+    }
+    out
+}
+
 /// One blocking request. Returns the text for the status line.
 pub fn post(job: &Job) -> Result<String, String> {
     let agent = ureq::AgentBuilder::new().timeout(TIMEOUT).build();
@@ -120,7 +133,7 @@ pub fn post(job: &Job) -> Result<String, String> {
         }
         Err(ureq::Error::Status(code, resp)) => {
             let body: Value = resp.into_string().ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null);
-            describe(job.label, code, &body)
+            describe(job.label, code, &body).map_err(|m| with_context(job, &body, m))
         }
         Err(ureq::Error::Transport(t)) => {
             let text = t.to_string().to_ascii_lowercase();
@@ -348,7 +361,7 @@ mod tests {
     fn errors_become_plain_messages() {
         let (url, h) = serve("401 Unauthorized", r#"{"detail":"no"}"#);
         let job = Job { url, token: "bad".into(), body: clear_if_hymn_body(), label: "clear" };
-        assert_eq!(post(&job).unwrap_err(), "Wrong token");
+        assert_eq!(post(&job).unwrap_err(), "Wrong token (no)");
         h.join().unwrap();
         let (url, h) = serve("200 OK", r#"{"state":{},"song":null,"logged":false}"#);
         let job = Job { url, token: "t".into(), body: hymn_body(&song("X")), label: "hymn" };
