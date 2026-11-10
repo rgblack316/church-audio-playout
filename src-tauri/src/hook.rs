@@ -54,7 +54,14 @@ pub struct Hook {
 
 /// `192.168.1.50:8091` or `http://host:8091/` -> `http://host:8091/api/hooks/bible`
 pub fn endpoint(base: &str) -> Result<String, String> {
-    let base = base.trim().trim_end_matches('/');
+    let mut base = base.trim().trim_end_matches('/');
+    // Accept the full webhook address as shown in Sanctuary Screens, with or without /api/hooks/bible.
+    for suffix in ["/api/hooks/bible", "/api/hooks", "/api"] {
+        if let Some(stripped) = base.strip_suffix(suffix) {
+            base = stripped.trim_end_matches('/');
+            break;
+        }
+    }
     if base.is_empty() {
         return Err("Enter the Sanctuary Screens address, for example http://192.168.1.50:8091".into());
     }
@@ -252,6 +259,9 @@ mod tests {
         assert_eq!(endpoint("192.168.1.50:8091").unwrap(), "http://192.168.1.50:8091/api/hooks/bible");
         assert_eq!(endpoint(" http://nuc:8091/ ").unwrap(), "http://nuc:8091/api/hooks/bible");
         assert_eq!(endpoint("https://x.example").unwrap(), "https://x.example/api/hooks/bible");
+        assert_eq!(endpoint("http://nuc:8091/api/hooks/bible").unwrap(), "http://nuc:8091/api/hooks/bible");
+        assert_eq!(endpoint("http://nuc:8091/api/hooks/bible/").unwrap(), "http://nuc:8091/api/hooks/bible");
+        assert_eq!(endpoint("nuc:8091/api/hooks/bible").unwrap(), "http://nuc:8091/api/hooks/bible");
         assert!(endpoint("  ").is_err());
     }
 
