@@ -889,6 +889,7 @@ fn hook_action(app: AppHandle, shared: State<'_, Shared>, hook: State<'_, hook::
 /// Watches which pads are playing and tells the display (see hook.rs).
 fn run_hook_watcher(app: AppHandle) {
     let mut tracker = hook::Tracker::default();
+    let mut tried: std::collections::HashSet<hook::PadKey> = Default::default();
     loop {
         std::thread::sleep(std::time::Duration::from_millis(150));
         let (enabled, url, token, clear_on_end, map) = {
@@ -908,6 +909,27 @@ fn run_hook_watcher(app: AppHandle) {
         }
         for p in snap.favs.iter().filter(|p| p.playing) {
             playing.insert((true, p.index));
+        }
+        // Favorites saved before this feature have no song details: look the file up in the library.
+        tried.retain(|k| playing.contains(k));
+        for key in playing.iter().filter(|k| k.0).copied() {
+            let missing = !app.state::<PadSongs>().0.lock().unwrap().contains_key(&key);
+            if missing && tried.insert(key) {
+                let song = {
+                    let shared = app.state::<Shared>();
+                    let state = shared.lock().unwrap();
+                    state
+                        .settings
+                        .favorites
+                        .get(key.1)
+                        .and_then(|f| f.as_ref())
+                        .and_then(|f| state.library.tracks.iter().find(|t| t.path == f.path))
+                        .and_then(song_of)
+                };
+                if song.is_some() {
+                    set_pad_song(&app, Bank::Fav, key.1, song);
+                }
+            }
         }
         let songs = app.state::<PadSongs>().0.lock().unwrap().clone();
         let Ok(url) = hook::endpoint(&url) else { continue };
