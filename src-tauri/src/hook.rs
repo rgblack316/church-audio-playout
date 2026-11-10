@@ -113,7 +113,11 @@ fn with_context(job: &Job, body: &Value, msg: String) -> String {
     }
     if let Some(d) = body.get("detail").and_then(Value::as_str) {
         out.push_str(&format!(" ({d})"));
+    } else if !body.is_null() {
+        let raw = body.to_string();
+        out.push_str(&format!(" (server said: {})", raw.chars().take(200).collect::<String>()));
     }
+    out.push_str(&format!(" [to: {}]", job.url));
     out
 }
 
@@ -361,7 +365,7 @@ mod tests {
     fn errors_become_plain_messages() {
         let (url, h) = serve("401 Unauthorized", r#"{"detail":"no"}"#);
         let job = Job { url, token: "bad".into(), body: clear_if_hymn_body(), label: "clear" };
-        assert_eq!(post(&job).unwrap_err(), "Wrong token (no)");
+        assert!(post(&job).unwrap_err().starts_with("Wrong token (no)"));
         h.join().unwrap();
         let (url, h) = serve("200 OK", r#"{"state":{},"song":null,"logged":false}"#);
         let job = Job { url, token: "t".into(), body: hymn_body(&song("X")), label: "hymn" };
