@@ -50,6 +50,9 @@ struct Settings {
     /// Level recordings automatically when they stop.
     #[serde(default = "default_overlap")]
     auto_level: bool,
+    /// After leveling, also limit loud peaks like Audacity's Limiter (threshold -6 dB, output -1 dB).
+    #[serde(default = "default_overlap")]
+    level_smooth: bool,
     /// Loudness target for leveling, in LUFS.
     #[serde(default = "default_target_lufs")]
     target_lufs: f64,
@@ -155,6 +158,7 @@ impl Default for Settings {
             hook_clear_on_end: true,
             hook_songbook_map: String::new(),
             auto_level: true,
+            level_smooth: true,
             target_lufs: default_target_lufs(),
             favorites: vec![None; FAV_SLOTS],
         }
@@ -696,7 +700,7 @@ fn set_level(job: &LevelJob, f: impl FnOnce(&mut LevelStatus)) {
 }
 
 /// Level `path` in the background and record the outcome in `LevelJob`.
-fn spawn_level(app: AppHandle, path: PathBuf, target: f64) {
+fn spawn_level(app: AppHandle, path: PathBuf, target: f64, smooth: bool) {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
     {
         let job = app.state::<LevelJob>();
@@ -723,7 +727,7 @@ fn spawn_level(app: AppHandle, path: PathBuf, target: f64) {
         let result = {
             let job = app.state::<LevelJob>();
             let mut last = -1.0f32;
-            playout_audio::level::level_wav(&path, &out, target, &mut |p| {
+            playout_audio::level::level_wav(&path, &out, target, smooth, &mut |p| {
                 if p - last >= 0.01 || p >= 1.0 {
                     last = p;
                     set_level(&job, |l| l.progress = p);
@@ -749,12 +753,12 @@ fn spawn_level(app: AppHandle, path: PathBuf, target: f64) {
 #[tauri::command(async)]
 fn stop_recording(app: AppHandle, shared: State<'_, Shared>, recorder: State<'_, Recorder>) -> Option<String> {
     let path = recorder.stop()?;
-    let (auto, target) = {
+    let (auto, target, smooth) = {
         let state = shared.lock().unwrap();
-        (state.settings.auto_level, state.settings.target_lufs)
+        (state.settings.auto_level, state.settings.target_lufs, state.settings.level_smooth)
     };
     if auto {
-        spawn_level(app, path.clone(), target);
+        spawn_level(app, path.clone(), target, smooth);
     } else {
         set_level(&app.state::<LevelJob>(), |l| *l = LevelStatus { state: "idle", ..Default::default() });
     }
@@ -765,17 +769,18 @@ fn stop_recording(app: AppHandle, shared: State<'_, Shared>, recorder: State<'_,
 struct LevelSettings {
     auto: bool,
     target: f64,
+    smooth: bool,
 }
 
 #[tauri::command]
 fn get_level_settings(app: AppHandle, shared: State<'_, Shared>) -> LevelSettings {
     let mut state = shared.lock().unwrap();
     ensure_init(&app, &mut state);
-    LevelSettings { auto: state.settings.auto_level, target: state.settings.target_lufs }
+    LevelSettings { auto: state.settings.auto_level, target: state.settings.target_lufs, smooth: state.settings.level_smooth }
 }
 
 #[tauri::command]
-fn set_level_settings(app: AppHandle, shared: State<'_, Shared>, auto: bool, target: f64) -> Result<(), String> {
+fn set_level_settings(app: AppHandle, shared: State<'_, Shared>, auto: bool, target: f64, smooth: bool) -> Result<(), String> {
     if !(-30.0..=-10.0).contains(&target) {
         return Err("Choose a target between -30 and -10 LUFS".into());
     }
@@ -783,6 +788,7 @@ fn set_level_settings(app: AppHandle, shared: State<'_, Shared>, auto: bool, tar
     ensure_init(&app, &mut state);
     state.settings.auto_level = auto;
     state.settings.target_lufs = target;
+    state.settings.level_smooth = smooth;
     save_settings(&app, &state.settings)
 }
 

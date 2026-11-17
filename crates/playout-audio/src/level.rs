@@ -15,6 +15,15 @@ pub const TRUE_PEAK_CEILING_DB: f64 = -1.0;
 const SAMPLE_CEILING_DB: f64 = TRUE_PEAK_CEILING_DB - 1.5;
 const LOOKAHEAD_SECS: f64 = 0.008;
 const RELEASE_SECS: f64 = 0.15;
+/// The "even out loud parts" stage mirrors Audacity's Limiter: threshold -6 dB, soft knee 2 dB,
+/// 1 ms look-ahead, 20 ms release, then make-up gain so the peaks land at -1 dB.
+pub const SMOOTH_THRESHOLD_DB: f64 = -6.0;
+pub const SMOOTH_OUTPUT_DB: f64 = -1.0;
+const SMOOTH_KNEE_DB: f64 = 2.0;
+const SMOOTH_LOOKAHEAD_SECS: f64 = 0.001;
+const SMOOTH_RELEASE_SECS: f64 = 0.020;
+/// Safety ceiling after the smoothing stage (sample peak), a little under its -1 dB output.
+const SMOOTH_SAFETY_DB: f64 = -1.5;
 /// More gain than this means the recording is silent or the input was muted.
 const MAX_GAIN_DB: f64 = 36.0;
 const CHUNK_FRAMES: usize = 8192;
@@ -32,6 +41,8 @@ pub struct LevelReport {
     pub true_peak_db: f64,
     /// True if the limiter had to turn peaks down (loudness may then sit a little under target).
     pub limited: bool,
+    /// The extra peak-smoothing stage was applied (loudness then ends above the target).
+    pub smoothed: bool,
 }
 
 /// Look-ahead peak limiter: the gain is the moving average of a sliding minimum over the
@@ -40,7 +51,8 @@ pub struct LevelReport {
 struct Limiter {
     ch: usize,
     n: usize,
-    ceiling: f32,
+    threshold_db: f64,
+    knee_db: f64,
     release: f32,
     pending: VecDeque<f32>,
     window_min: VecDeque<(u64, f32)>,
@@ -52,13 +64,14 @@ struct Limiter {
 }
 
 impl Limiter {
-    fn new(ch: usize, rate: u32) -> Self {
-        let n = ((LOOKAHEAD_SECS * rate as f64) as usize).max(1);
+    fn new(ch: usize, rate: u32, threshold_db: f64, knee_db: f64, lookahead_secs: f64, release_secs: f64) -> Self {
+        let n = ((lookahead_secs * rate as f64) as usize).max(1);
         Self {
             ch,
             n,
-            ceiling: 10f64.powf(SAMPLE_CEILING_DB / 20.0) as f32,
-            release: (1.0 - (-1.0 / (RELEASE_SECS * rate as f64)).exp()) as f32,
+            threshold_db,
+            knee_db,
+            release: (1.0 - (-1.0 / (release_secs * rate as f64)).exp()) as f32,
             pending: VecDeque::new(),
             window_min: VecDeque::new(),
             history: VecDeque::new(),
@@ -69,9 +82,27 @@ impl Limiter {
         }
     }
 
+    /// Gain (linear, <= 1) that brings a peak of this size under the threshold, with a soft knee.
+    fn target_gain(&self, peak: f32) -> f32 {
+        if peak <= 0.0 {
+            return 1.0;
+        }
+        let level = 20.0 * (peak as f64).log10();
+        let w = self.knee_db;
+        let x = level - self.threshold_db + w / 2.0;
+        let out = if x <= 0.0 {
+            return 1.0;
+        } else if w > 0.0 && x < w {
+            level - x * x / (2.0 * w)
+        } else {
+            self.threshold_db
+        };
+        10f64.powf((out - level) / 20.0).min(1.0) as f32
+    }
+
     fn push(&mut self, frame: &[f32], out: &mut Vec<f32>) {
         let peak = frame.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-        let t = if peak > self.ceiling { self.ceiling / peak } else { 1.0 };
+        let t = self.target_gain(peak);
         let idx = self.pushed;
         self.pushed += 1;
         while self.window_min.back().is_some_and(|&(_, v)| v >= t) {
@@ -210,6 +241,7 @@ pub fn level_wav(
     input: &Path,
     output: &Path,
     target_lufs: f64,
+    smooth: bool,
     progress: &mut dyn FnMut(f32),
 ) -> Result<LevelReport, String> {
     if !(-40.0..=-6.0).contains(&target_lufs) {
@@ -245,7 +277,11 @@ pub fn level_wav(
     let mut writer = hound::WavWriter::create(&temp, out_spec).map_err(|e| format!("Could not create {}: {e}", output.display()))?;
     let mut check = EbuR128::new(ch as u32, spec.sample_rate, Mode::I).map_err(|e| format!("Loudness meter: {e}"))?;
     let mut tp = TruePeak::new(ch);
-    let mut limiter = Limiter::new(ch, spec.sample_rate);
+    let (safety_db, safety_knee) = if smooth { (SMOOTH_SAFETY_DB, 0.0) } else { (SAMPLE_CEILING_DB, 0.0) };
+    let mut limiter = Limiter::new(ch, spec.sample_rate, safety_db, safety_knee, LOOKAHEAD_SECS, RELEASE_SECS);
+    let mut smoother = smooth.then(|| Limiter::new(ch, spec.sample_rate, SMOOTH_THRESHOLD_DB, SMOOTH_KNEE_DB, SMOOTH_LOOKAHEAD_SECS, SMOOTH_RELEASE_SECS));
+    let makeup = 10f32.powf((SMOOTH_OUTPUT_DB - SMOOTH_THRESHOLD_DB) as f32 / 20.0);
+    let mut stage: Vec<f32> = Vec::new();
     let mut out: Vec<f32> = Vec::new();
     let mut write = |samples: &[f32], writer: &mut hound::WavWriter<_>, check: &mut EbuR128| -> Result<(), String> {
         tp.add(samples);
@@ -262,13 +298,31 @@ pub fn level_wav(
         out.clear();
         for frame in buf.chunks_exact(ch) {
             let scaled: [f32; 2] = [frame[0] * gain, frame[ch - 1] * gain];
-            limiter.push(&scaled[..ch], &mut out);
+            match smoother.as_mut() {
+                Some(sm) => {
+                    stage.clear();
+                    sm.push(&scaled[..ch], &mut stage);
+                    for f in stage.chunks_exact(ch) {
+                        let up: [f32; 2] = [f[0] * makeup, f[ch - 1] * makeup];
+                        limiter.push(&up[..ch], &mut out);
+                    }
+                }
+                None => limiter.push(&scaled[..ch], &mut out),
+            }
         }
         write(&out, &mut writer, &mut check)?;
         done += (buf.len() / ch) as f32;
         progress(0.45 + 0.55 * done / total);
     }
     out.clear();
+    if let Some(sm) = smoother.as_mut() {
+        stage.clear();
+        sm.finish(&mut stage);
+        for f in stage.chunks_exact(ch) {
+            let up: [f32; 2] = [f[0] * makeup, f[ch - 1] * makeup];
+            limiter.push(&up[..ch], &mut out);
+        }
+    }
     limiter.finish(&mut out);
     write(&out, &mut writer, &mut check)?;
     writer.finalize().map_err(|e| format!("Finishing {} failed: {e}", output.display()))?;
@@ -284,7 +338,8 @@ pub fn level_wav(
         gain_db,
         final_lufs,
         true_peak_db: to_db(peak),
-        limited: limiter.min_gain < 0.99,
+        limited: limiter.min_gain < 0.99 || smoother.as_ref().is_some_and(|sm| sm.min_gain < 0.99),
+        smoothed: smooth,
     })
 }
 
@@ -335,7 +390,7 @@ mod tests {
         let out = leveled_path(&input);
         assert_eq!(out.file_name().unwrap(), "quiet-leveled.wav");
         let mut last = 0.0;
-        let r = level_wav(&input, &out, -16.0, &mut |p| {
+        let r = level_wav(&input, &out, -16.0, false, &mut |p| {
             assert!(p >= last, "progress never goes backwards");
             last = p;
         })
@@ -359,7 +414,7 @@ mod tests {
         let input = dir.path().join("peaky.wav");
         write_test_wav(&input, 48_000, 2, 12.0, 0.05, true);
         let out = dir.path().join("peaky-out.wav");
-        let r = level_wav(&input, &out, -16.0, &mut |_| {}).unwrap();
+        let r = level_wav(&input, &out, -16.0, false, &mut |_| {}).unwrap();
         assert!(r.limited, "the spikes need limiting");
         assert!(r.true_peak_db <= TRUE_PEAK_CEILING_DB + 0.05, "true peak {} dB", r.true_peak_db);
         // measure again from the written file, independently of the leveler's own numbers
@@ -368,12 +423,48 @@ mod tests {
         assert!(to_db(sample_peak) <= -1.0, "sample peak {} dBFS", to_db(sample_peak));
     }
 
+    /// Crest factor (peak over RMS, dB) of a written file.
+    fn crest_db(path: &Path) -> f64 {
+        let mut rd = hound::WavReader::open(path).unwrap();
+        let v: Vec<f64> = rd.samples::<i32>().map(|s| s.unwrap() as f64 / 8_388_608.0).collect();
+        let peak = v.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        let rms = (v.iter().map(|x| x * x).sum::<f64>() / v.len() as f64).sqrt();
+        20.0 * (peak / rms).log10()
+    }
+
+    #[test]
+    fn smoothing_evens_out_loud_parts_like_the_audacity_limiter() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("speech.wav");
+        write_test_wav(&input, 48_000, 2, 12.0, 0.05, true);
+        let plain = dir.path().join("plain.wav");
+        let smooth = dir.path().join("smooth.wav");
+        let a = level_wav(&input, &plain, -16.0, false, &mut |_| {}).unwrap();
+        let b = level_wav(&input, &smooth, -16.0, true, &mut |_| {}).unwrap();
+        assert!(b.smoothed && !a.smoothed);
+        assert!(crest_db(&smooth) + 2.0 < crest_db(&plain), "crest {} vs {}", crest_db(&smooth), crest_db(&plain));
+        assert!(b.final_lufs > a.final_lufs + 1.0, "makeup gain makes it louder: {} vs {}", b.final_lufs, a.final_lufs);
+        assert!(b.true_peak_db <= -0.4, "peaks stay under full scale: {}", b.true_peak_db);
+        let (pa, pb) = (hound::WavReader::open(&plain).unwrap().duration(), hound::WavReader::open(&smooth).unwrap().duration());
+        assert_eq!(pa, pb, "same length");
+    }
+
+    #[test]
+    fn soft_knee_gain_curve_matches_the_settings() {
+        let l = Limiter::new(1, 48_000, SMOOTH_THRESHOLD_DB, SMOOTH_KNEE_DB, SMOOTH_LOOKAHEAD_SECS, SMOOTH_RELEASE_SECS);
+        let db = |peak_db: f64| 20.0 * (l.target_gain(10f64.powf(peak_db / 20.0) as f32) as f64).log10();
+        assert_eq!(db(-8.0), 0.0, "below the knee: untouched");
+        assert!(db(-6.0) < -0.1 && db(-6.0) > -0.5, "inside the knee: {}", db(-6.0));
+        assert!((db(-5.0) - (-1.0)).abs() < 0.01, "above the knee a peak is held at -6: {}", db(-5.0));
+        assert!((db(0.0) - (-6.0)).abs() < 0.01, "full scale comes down to -6: {}", db(0.0));
+    }
+
     #[test]
     fn mono_files_and_loud_files_work_too() {
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("loud.wav");
         write_test_wav(&input, 44_100, 1, 8.0, 0.5, false);
-        let r = level_wav(&input, &dir.path().join("o.wav"), -19.0, &mut |_| {}).unwrap();
+        let r = level_wav(&input, &dir.path().join("o.wav"), -19.0, false, &mut |_| {}).unwrap();
         assert!(r.gain_db < 0.0, "a loud file is turned down");
         assert!((r.final_lufs + 19.0).abs() < 0.3, "final {}", r.final_lufs);
     }
@@ -383,10 +474,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("silent.wav");
         write_test_wav(&input, 48_000, 2, 3.0, 0.0, false);
-        let err = level_wav(&input, &dir.path().join("o.wav"), -16.0, &mut |_| {}).unwrap_err();
+        let err = level_wav(&input, &dir.path().join("o.wav"), -16.0, false, &mut |_| {}).unwrap_err();
         assert!(err.contains("silent"), "{err}");
-        assert!(level_wav(&input, &dir.path().join("o.wav"), 5.0, &mut |_| {}).is_err());
-        assert!(level_wav(&dir.path().join("missing.wav"), &dir.path().join("o.wav"), -16.0, &mut |_| {}).is_err());
+        assert!(level_wav(&input, &dir.path().join("o.wav"), 5.0, false, &mut |_| {}).is_err());
+        assert!(level_wav(&dir.path().join("missing.wav"), &dir.path().join("o.wav"), -16.0, false, &mut |_| {}).is_err());
     }
 
     #[test]
@@ -397,7 +488,7 @@ mod tests {
         let mut bytes = std::fs::read(&input).unwrap();
         bytes.truncate(bytes.len() - 100_001); // data chunk now ends mid-frame, header still claims more
         std::fs::write(&input, bytes).unwrap();
-        let r = level_wav(&input, &dir.path().join("o.wav"), -16.0, &mut |_| {}).unwrap();
+        let r = level_wav(&input, &dir.path().join("o.wav"), -16.0, false, &mut |_| {}).unwrap();
         assert!((r.final_lufs + 16.0).abs() < 0.5, "final {}", r.final_lufs);
     }
 }

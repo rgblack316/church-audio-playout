@@ -308,8 +308,10 @@
       </select>
     </label>
   </div>
+  <label><input type="checkbox" id="levelSmooth"> Also limit loud peaks (like Audacity's Limiter: threshold -6 dB, output -1 dB)</label>
   <p class="small">The original recording is kept; a copy named <code>&hellip;-leveled.wav</code> is made with its
-     loudness set to the target, and peaks held under -1 dB.</p>
+     loudness set to the target. With the limiter on, it ends up louder than the target, as it does when you run
+     both steps in Audacity. Peaks always stay below full scale.</p>
   <p class="small">Recordings are saved as 24-bit WAV, named with the date and time. Use a folder that is not
      synced by OneDrive. Windows is kept awake while recording.</p>
   <div class="err" id="recErr"></div>
@@ -540,6 +542,7 @@ async function loadRecordSettings() {
     $('recDir').value = rs.dir;
     const ls = await invoke('get_level_settings');
     $('autoLevel').checked = ls.auto;
+    $('levelSmooth').checked = ls.smooth !== false;
     const preset = $('levelPreset');
     if (![...preset.options].some((o) => Number(o.value) === ls.target)) preset.add(new Option(`${ls.target} LUFS`, String(ls.target)));
     preset.value = String(ls.target);
@@ -548,10 +551,11 @@ async function loadRecordSettings() {
 $('recInput').addEventListener('change', () =>
   invoke('set_record_device', { name: $('recInput').value || null }).catch((e) => { $('recErr').textContent = String(e); }));
 const saveLevel = () =>
-  invoke('set_level_settings', { auto: $('autoLevel').checked, target: Number($('levelPreset').value) })
+  invoke('set_level_settings', { auto: $('autoLevel').checked, target: Number($('levelPreset').value), smooth: $('levelSmooth').checked })
     .catch((e) => { $('recErr').textContent = String(e); });
 $('autoLevel').addEventListener('change', saveLevel);
 $('levelPreset').addEventListener('change', saveLevel);
+$('levelSmooth').addEventListener('change', saveLevel);
 $('refreshInputs').addEventListener('click', loadRecordSettings);
 async function saveRecDir(path) {
   $('recErr').textContent = '';
@@ -687,7 +691,7 @@ function renderRec(s) {
     info.textContent = `Leveling ${levelState.file}\u2026 ${Math.round(levelState.progress * 100)}%`;
   } else if (levelState.state === 'done' && levelState.report) {
     const r = levelState.report;
-    info.textContent = `Saved ${levelState.file} \u00b7 ${r.measured_lufs.toFixed(1)} \u2192 ${r.final_lufs.toFixed(1)} LUFS (${r.gain_db >= 0 ? '+' : ''}${r.gain_db.toFixed(1)} dB)${r.limited ? ' \u00b7 peaks limited' : ''}`;
+    info.textContent = `Saved ${levelState.file} \u00b7 ${r.measured_lufs.toFixed(1)} \u2192 ${r.final_lufs.toFixed(1)} LUFS (${r.gain_db >= 0 ? '+' : ''}${r.gain_db.toFixed(1)} dB)${r.limited ? ' \u00b7 peaks limited' : ''}${r.smoothed ? ' \u00b7 limiter on' : ''}`;
   } else if (levelState.state === 'error' || levelState.state === 'skipped') {
     info.className = 'err';
     info.textContent = `Not leveled: ${levelState.message}`;
