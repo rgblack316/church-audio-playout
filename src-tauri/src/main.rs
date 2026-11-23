@@ -50,6 +50,9 @@ struct Settings {
     /// Level recordings automatically when they stop.
     #[serde(default = "default_overlap")]
     auto_level: bool,
+    /// Recording format: "wav24" (default), "wav32f" or "mp3".
+    #[serde(default = "default_record_format")]
+    record_format: String,
     /// After leveling, also limit loud peaks like Audacity's Limiter (threshold -6 dB, output -1 dB).
     #[serde(default = "default_overlap")]
     level_smooth: bool,
@@ -123,6 +126,10 @@ fn default_columns() -> usize {
 fn default_rows() -> usize {
     DEFAULT_ROWS
 }
+fn default_record_format() -> String {
+    "wav24".to_string()
+}
+
 fn default_target_lufs() -> f64 {
     -16.0
 }
@@ -158,6 +165,7 @@ impl Default for Settings {
             hook_clear_on_end: true,
             hook_songbook_map: String::new(),
             auto_level: true,
+            record_format: default_record_format(),
             level_smooth: true,
             target_lufs: default_target_lufs(),
             favorites: vec![None; FAV_SLOTS],
@@ -588,13 +596,13 @@ fn clean_file_name(name: &str) -> String {
 }
 
 /// `<dir>/11-08-2026 Sermon.wav`; a number is added if that file already exists.
-fn recording_path(dir: &Path, name: &str, stamp: &str) -> PathBuf {
+fn recording_path(dir: &Path, name: &str, stamp: &str, ext: &str) -> PathBuf {
     let name = clean_file_name(name);
     let base = if name.is_empty() { stamp.to_string() } else { format!("{stamp} {name}") };
-    let mut path = dir.join(format!("{base}.wav"));
+    let mut path = dir.join(format!("{base}.{ext}"));
     let mut n = 2;
     while path.exists() {
-        path = dir.join(format!("{base} ({n}).wav"));
+        path = dir.join(format!("{base} ({n}).{ext}"));
         n += 1;
     }
     path
@@ -615,6 +623,12 @@ fn record_dir_of(app: &AppHandle, settings: &Settings) -> PathBuf {
 struct RecordSettings {
     dir: String,
     device: Option<String>,
+    /// "wav24", "wav32f" or "mp3".
+    format: String,
+}
+
+fn format_of(settings: &Settings) -> playout_audio::RecFormat {
+    playout_audio::RecFormat::from_key(&settings.record_format).unwrap_or_default()
 }
 
 #[tauri::command]
@@ -624,7 +638,22 @@ fn get_record_settings(app: AppHandle, shared: State<'_, Shared>) -> RecordSetti
     RecordSettings {
         dir: record_dir_of(&app, &state.settings).display().to_string(),
         device: state.settings.record_device.clone(),
+        format: format_of(&state.settings).key().to_string(),
     }
+}
+
+#[tauri::command]
+fn set_record_format(app: AppHandle, shared: State<'_, Shared>, recorder: State<'_, Recorder>, format: String) -> Result<(), String> {
+    if playout_audio::RecFormat::from_key(&format).is_none() {
+        return Err("Unknown recording format".into());
+    }
+    if recorder.is_recording() {
+        return Err("Stop the recording before changing the format".into());
+    }
+    let mut state = shared.lock().unwrap();
+    ensure_init(&app, &mut state);
+    state.settings.record_format = format;
+    save_settings(&app, &state.settings)
 }
 
 #[derive(Serialize)]
@@ -671,15 +700,15 @@ fn start_recording(
     recorder: State<'_, Recorder>,
     name: Option<String>,
 ) -> Result<String, String> {
-    let (dir, device) = {
+    let (dir, device, format) = {
         let mut state = shared.lock().unwrap();
         ensure_init(&app, &mut state);
-        (record_dir_of(&app, &state.settings), state.settings.record_device.clone())
+        (record_dir_of(&app, &state.settings), state.settings.record_device.clone(), format_of(&state.settings))
     };
     fs::create_dir_all(&dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
     let stamp = chrono::Local::now().format("%m-%d-%Y").to_string();
-    let path = recording_path(&dir, name.as_deref().unwrap_or(""), &stamp);
-    recorder.start(device.as_deref(), path.clone())?;
+    let path = recording_path(&dir, name.as_deref().unwrap_or(""), &stamp, format.ext());
+    recorder.start(device.as_deref(), path.clone(), format)?;
     Ok(path.display().to_string())
 }
 
@@ -727,7 +756,7 @@ fn spawn_level(app: AppHandle, path: PathBuf, target: f64, smooth: bool) {
         let result = {
             let job = app.state::<LevelJob>();
             let mut last = -1.0f32;
-            playout_audio::level::level_wav(&path, &out, target, smooth, &mut |p| {
+            playout_audio::level::level_file(&path, &out, target, smooth, &mut |p| {
                 if p - last >= 0.01 || p >= 1.0 {
                     last = p;
                     set_level(&job, |l| l.progress = p);
@@ -1169,6 +1198,7 @@ fn main() {
             get_record_settings,
             list_input_devices,
             set_record_device,
+            set_record_format,
             get_hook_settings,
             set_hook_settings,
             hook_test,
@@ -1216,14 +1246,15 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         assert_eq!(clean_file_name("  Sermon: Part 1/2? "), "Sermon Part 1 2");
         assert_eq!(clean_file_name("..."), "");
-        let p = recording_path(&dir, "", "11-08-2026");
+        let p = recording_path(&dir, "", "11-08-2026", "wav");
         assert_eq!(p.file_name().unwrap(), "11-08-2026.wav");
         fs::write(&p, b"x").unwrap();
-        let p2 = recording_path(&dir, "Sermon", "11-08-2026");
+        let p2 = recording_path(&dir, "Sermon", "11-08-2026", "wav");
         assert_eq!(p2.file_name().unwrap(), "11-08-2026 Sermon.wav");
         fs::write(&p2, b"x").unwrap();
-        let p3 = recording_path(&dir, "Sermon", "11-08-2026");
+        let p3 = recording_path(&dir, "Sermon", "11-08-2026", "wav");
         assert_eq!(p3.file_name().unwrap(), "11-08-2026 Sermon (2).wav");
+        assert_eq!(recording_path(&dir, "", "11-09-2026", "mp3").file_name().unwrap(), "11-09-2026.mp3");
         let _ = fs::remove_dir_all(&dir);
     }
 

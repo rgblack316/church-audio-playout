@@ -1,9 +1,10 @@
-//! Recording an input device (for example the RODECaster's USB mix) to a 24-bit WAV file.
+//! Recording an input device (for example the RODECaster's USB mix) to a WAV (24-bit or float) or MP3 file.
 //!
 //! The audio callback only copies samples into a channel; a separate writer thread does all
 //! the disk work, so a slow disk can never disturb playback. The WAV header is refreshed every
 //! couple of seconds, so a crash or power loss leaves a playable file.
 
+use crate::format::{RecFormat, Sink};
 use crate::{label_devices, parse_choice, DeviceEntry};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use serde::Serialize;
@@ -108,50 +109,39 @@ pub fn part_path(base: &Path, part: u32) -> PathBuf {
         return base.to_path_buf();
     }
     let stem = base.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    base.with_file_name(format!("{stem} (part {part}).wav"))
+    let ext = base.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| "wav".into());
+    base.with_file_name(format!("{stem} (part {part}).{ext}"))
 }
 
-fn open_wav(path: &Path, rate: u32) -> Result<hound::WavWriter<std::io::BufWriter<std::fs::File>>, String> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
-    }
-    let spec = hound::WavSpec { channels: 2, sample_rate: rate, bits_per_sample: 24, sample_format: hound::SampleFormat::Int };
-    hound::WavWriter::create(path, spec).map_err(|e| format!("Could not create {}: {e}", path.display()))
-}
-
-/// Receive stereo f32 blocks and write them as 24-bit WAV until the sender is dropped.
-/// `part_limit` is the size at which a new file is started.
-fn write_loop(rx: Receiver<Vec<f32>>, base: PathBuf, rate: u32, shared: &Shared, part_limit: u64) -> Result<(), String> {
+/// Receive stereo f32 blocks and write them in `format` until the sender is dropped.
+/// `part_limit` is the size at which a new file is started (WAV only; MP3 files stay small).
+fn write_loop(rx: Receiver<Vec<f32>>, base: PathBuf, rate: u32, shared: &Shared, part_limit: u64, format: RecFormat) -> Result<(), String> {
     let mut part = 1u32;
-    let mut writer = open_wav(&base, rate)?;
+    let mut writer = Sink::create(format, &base, rate, 2)?;
     let mut part_bytes = 0u64;
     let mut since_flush = 0u64;
     let flush_frames = rate as u64 * FLUSH_EVERY_SECS;
     for block in rx {
-        for s in &block {
-            let v = (s.clamp(-1.0, 1.0) * 8_388_607.0) as i32;
-            writer.write_sample(v).map_err(|e| format!("Writing the recording failed: {e}"))?;
-        }
+        let bytes = writer.write(&block)?;
         let frames = (block.len() / 2) as u64;
-        let bytes = block.len() as u64 * 3;
         part_bytes += bytes;
         since_flush += frames;
         shared.frames.fetch_add(frames, Ordering::Relaxed);
         shared.bytes.fetch_add(bytes, Ordering::Relaxed);
-        if part_bytes >= part_limit {
-            writer.finalize().map_err(|e| format!("Finishing the recording failed: {e}"))?;
+        if format.is_wav() && part_bytes >= part_limit {
+            writer.finish()?;
             part += 1;
             let next = part_path(&base, part);
-            writer = open_wav(&next, rate)?;
+            writer = Sink::create(format, &next, rate, 2)?;
             *lock(&shared.path) = next;
             part_bytes = 0;
             since_flush = 0;
         } else if since_flush >= flush_frames {
-            writer.flush().map_err(|e| format!("Writing the recording failed: {e}"))?;
+            writer.flush()?;
             since_flush = 0;
         }
     }
-    writer.finalize().map_err(|e| format!("Finishing the recording failed: {e}"))
+    writer.finish()
 }
 
 struct Active {
@@ -179,7 +169,7 @@ impl Recorder {
     }
 
     /// Start recording `choice` (None = default input; "Name@@3" = channels 3-4) into `path`.
-    pub fn start(&self, choice: Option<&str>, path: PathBuf) -> Result<(), String> {
+    pub fn start(&self, choice: Option<&str>, path: PathBuf, format: RecFormat) -> Result<(), String> {
         let mut active = lock(&self.active);
         if let Some(a) = active.as_ref() {
             if a.shared.running.load(Ordering::Relaxed) {
@@ -207,7 +197,7 @@ impl Recorder {
         let stop_for_errors = stop_tx.clone();
         let join = std::thread::Builder::new()
             .name("record".into())
-            .spawn(move || run(choice, path, thread_shared, stop_rx, stop_for_errors, ready_tx))
+            .spawn(move || run(choice, path, format, thread_shared, stop_rx, stop_for_errors, ready_tx))
             .map_err(|e| format!("Could not start recording: {e}"))?;
         match ready_rx.recv_timeout(Duration::from_secs(15)) {
             Ok(Ok((device, rate))) => {
@@ -275,6 +265,7 @@ fn status_of(a: &Active, recording: bool) -> RecStatus {
 fn run(
     choice: Option<String>,
     path: PathBuf,
+    format: RecFormat,
     shared: Arc<Shared>,
     stop_rx: Receiver<()>,
     stop_for_errors: Sender<()>,
@@ -293,7 +284,7 @@ fn run(
     let writer_shared = shared.clone();
     let writer = std::thread::Builder::new()
         .name("record-writer".into())
-        .spawn(move || write_loop(rx, path, rate, &writer_shared, PART_LIMIT_BYTES));
+        .spawn(move || write_loop(rx, path, rate, &writer_shared, PART_LIMIT_BYTES, format));
     let writer = match writer {
         Ok(w) => w,
         Err(e) => {
@@ -559,7 +550,7 @@ mod tests {
             tx.send((0..200).map(|n| ((n + i * 200) as f32 / 1000.0).sin() * 0.5).collect()).unwrap();
         }
         drop(tx);
-        write_loop(rx, base.clone(), 48_000, &sh, 1_000).unwrap();
+        write_loop(rx, base.clone(), 48_000, &sh, 1_000, RecFormat::Wav24).unwrap();
         assert_eq!(sh.frames.load(Ordering::Relaxed), 300);
 
         let first = hound::WavReader::open(&base).unwrap();
@@ -578,14 +569,52 @@ mod tests {
     }
 
     #[test]
+    fn float_wav_keeps_samples_exactly_even_above_full_scale() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("f.wav");
+        let sh = shared(&base);
+        let (tx, rx) = channel::<Vec<f32>>();
+        tx.send(vec![0.25, -0.5, 1.5, -2.0]).unwrap();
+        drop(tx);
+        write_loop(rx, base.clone(), 48_000, &sh, u64::MAX, RecFormat::Wav32f).unwrap();
+        let mut r = hound::WavReader::open(&base).unwrap();
+        assert_eq!((r.spec().bits_per_sample, r.spec().sample_format), (32, hound::SampleFormat::Float));
+        let v: Vec<f32> = r.samples::<f32>().map(|s| s.unwrap()).collect();
+        assert_eq!(v, vec![0.25, -0.5, 1.5, -2.0]);
+        assert_eq!(sh.bytes.load(Ordering::Relaxed), 16);
+    }
+
+    #[test]
+    fn mp3_recording_is_a_256k_file_that_decodes_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("m.mp3");
+        let sh = shared(&base);
+        let (tx, rx) = channel::<Vec<f32>>();
+        let secs = 4usize;
+        for sec in 0..secs {
+            let block: Vec<f32> = (0..48_000).flat_map(|i| {
+                let t = (sec * 48_000 + i) as f32 / 48_000.0;
+                let v = (t * 440.0 * std::f32::consts::TAU).sin() * 0.4;
+                [v, v]
+            }).collect();
+            tx.send(block).unwrap();
+        }
+        drop(tx);
+        write_loop(rx, base.clone(), 48_000, &sh, u64::MAX, RecFormat::Mp3).unwrap();
+        let size = std::fs::metadata(&base).unwrap().len();
+        let expected = 256_000 / 8 * secs as u64;
+        assert!(size > expected * 9 / 10 && size < expected * 11 / 10, "size {size} vs about {expected}");
+        assert_eq!(sh.frames.load(Ordering::Relaxed), 48_000 * secs as u64);
+        assert!(sh.bytes.load(Ordering::Relaxed) > 0);
+    }
+
+    #[test]
     fn unfinished_file_is_still_readable_after_a_flush() {
         // Simulates a crash: write enough audio to trigger a header flush, then never finalize.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("crash.wav");
-        let mut w = open_wav(&path, 100).unwrap();
-        for _ in 0..1000 {
-            w.write_sample(1000i32).unwrap();
-        }
+        let mut w = Sink::create(RecFormat::Wav24, &path, 100, 2).unwrap();
+        w.write(&vec![0.0001f32; 1000]).unwrap();
         w.flush().unwrap();
         std::mem::forget(w); // process "dies" here
         let r = hound::WavReader::open(&path).unwrap();

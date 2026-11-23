@@ -2,6 +2,7 @@
 //! the gain that brings it to a target such as -16 LUFS, and keep peaks under a true-peak
 //! ceiling with a look-ahead limiter. The original file is never touched.
 
+use crate::format::{RecFormat, Sink};
 use ebur128::{EbuR128, Mode};
 use serde::Serialize;
 use std::{
@@ -146,21 +147,44 @@ impl Limiter {
     }
 }
 
-/// Reads a WAV (16/24/32-bit integer or 32-bit float) as f32 chunks. A file cut short by a crash
-/// simply ends where the data ends.
-struct WavFrames {
-    samples: Box<dyn Iterator<Item = f32>>,
-    ch: usize,
+/// What `open_source` learned about the input file.
+struct SourceInfo {
+    channels: usize,
+    rate: u32,
+    /// Length in frames (an estimate when the container does not say).
+    frames: u64,
+    float: bool,
+    mp3: bool,
 }
 
-impl WavFrames {
-    fn open(path: &Path) -> Result<(Self, hound::WavSpec, u32), String> {
+/// Reads a WAV (16/24/32-bit integer or 32-bit float) or any file the player can decode (MP3 and
+/// others) as f32 chunks. A WAV cut short by a crash simply ends where the data ends.
+enum Source {
+    Wav { samples: Box<dyn Iterator<Item = f32>>, ch: usize },
+    Decoded(Decoded),
+}
+
+struct Decoded {
+    format: Box<dyn symphonia::core::formats::FormatReader>,
+    decoder: Box<dyn symphonia::core::codecs::Decoder>,
+    track_id: u32,
+    pending: std::collections::VecDeque<f32>,
+    ch: usize,
+    done: bool,
+}
+
+fn is_wav(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("wav"))
+}
+
+fn open_source(path: &Path) -> Result<(Source, SourceInfo), String> {
+    if is_wav(path) {
         let reader = hound::WavReader::open(path).map_err(|e| format!("Could not read {}: {e}", path.display()))?;
         let spec = reader.spec();
         if !(1..=2).contains(&spec.channels) {
             return Err(format!("Leveling supports mono and stereo files (this one has {} channels)", spec.channels));
         }
-        let frames = reader.duration();
+        let frames = reader.duration() as u64;
         let samples: Box<dyn Iterator<Item = f32>> = match spec.sample_format {
             hound::SampleFormat::Float => Box::new(reader.into_samples::<f32>().map_while(Result::ok)),
             hound::SampleFormat::Int => {
@@ -168,14 +192,76 @@ impl WavFrames {
                 Box::new(reader.into_samples::<i32>().map_while(Result::ok).map(move |s| s as f32 / scale))
             }
         };
-        Ok((Self { samples, ch: spec.channels as usize }, spec, frames))
+        let info = SourceInfo {
+            channels: spec.channels as usize,
+            rate: spec.sample_rate,
+            frames,
+            float: spec.sample_format == hound::SampleFormat::Float,
+            mp3: false,
+        };
+        return Ok((Source::Wav { samples, ch: info.channels }, info));
     }
+    use symphonia::core::{codecs::DecoderOptions, formats::FormatOptions, io::MediaSourceStream, meta::MetadataOptions, probe::Hint};
+    let file = std::fs::File::open(path).map_err(|e| format!("Could not read {}: {e}", path.display()))?;
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let probed = symphonia::default::get_probe()
+        .format(&hint, MediaSourceStream::new(Box::new(file), Default::default()), &FormatOptions::default(), &MetadataOptions::default())
+        .map_err(|e| format!("Could not read {}: {e}", path.display()))?;
+    let format = probed.format;
+    let track = format.default_track().ok_or("The file has no audio")?;
+    let params = track.codec_params.clone();
+    let channels = params.channels.map(|c| c.count()).unwrap_or(2);
+    if !(1..=2).contains(&channels) {
+        return Err(format!("Leveling supports mono and stereo files (this one has {channels} channels)"));
+    }
+    let rate = params.sample_rate.ok_or("The file does not say its sample rate")?;
+    let decoder = symphonia::default::get_codecs()
+        .make(&params, &DecoderOptions::default())
+        .map_err(|e| format!("Could not decode {}: {e}", path.display()))?;
+    let info = SourceInfo { channels, rate, frames: params.n_frames.unwrap_or(rate as u64 * 3600), float: false, mp3: path.extension().is_some_and(|e| e.eq_ignore_ascii_case("mp3")) };
+    let track_id = track.id;
+    Ok((Source::Decoded(Decoded { format, decoder, track_id, pending: Default::default(), ch: channels, done: false }), info))
+}
 
+impl Source {
     fn next_chunk(&mut self, buf: &mut Vec<f32>) -> bool {
         buf.clear();
-        buf.extend((&mut self.samples).take(CHUNK_FRAMES * self.ch));
-        let whole = buf.len() / self.ch * self.ch;
-        buf.truncate(whole);
+        match self {
+            Source::Wav { samples, ch } => {
+                buf.extend(samples.take(CHUNK_FRAMES * *ch));
+                let whole = buf.len() / *ch * *ch;
+                buf.truncate(whole);
+            }
+            Source::Decoded(d) => {
+                use symphonia::core::{audio::SampleBuffer, errors::Error};
+                while d.pending.len() < CHUNK_FRAMES * d.ch && !d.done {
+                    let packet = match d.format.next_packet() {
+                        Ok(p) => p,
+                        Err(_) => {
+                            d.done = true; // end of file (or an unreadable tail)
+                            break;
+                        }
+                    };
+                    if packet.track_id() != d.track_id {
+                        continue;
+                    }
+                    match d.decoder.decode(&packet) {
+                        Ok(audio) => {
+                            let mut sb = SampleBuffer::<f32>::new(audio.capacity() as u64, *audio.spec());
+                            sb.copy_interleaved_ref(audio);
+                            d.pending.extend(sb.samples().iter().copied());
+                        }
+                        Err(Error::DecodeError(_)) => continue, // skip a damaged frame
+                        Err(_) => d.done = true,
+                    }
+                }
+                let take = (d.pending.len().min(CHUNK_FRAMES * d.ch) / d.ch) * d.ch;
+                buf.extend(d.pending.drain(..take));
+            }
+        }
         !buf.is_empty()
     }
 }
@@ -237,7 +323,7 @@ fn to_db(linear: f64) -> f64 {
 }
 
 /// Level `input` to `target_lufs`, writing a 24-bit WAV to `output`. `progress` gets 0.0..=1.0.
-pub fn level_wav(
+pub fn level_file(
     input: &Path,
     output: &Path,
     target_lufs: f64,
@@ -247,12 +333,20 @@ pub fn level_wav(
     if !(-40.0..=-6.0).contains(&target_lufs) {
         return Err("The loudness target must be between -40 and -6 LUFS".into());
     }
-    let (mut frames, spec, total) = WavFrames::open(input)?;
-    let ch = frames.ch;
-    let total = total.max(1) as f32;
+    let (mut frames, info) = open_source(input)?;
+    let ch = info.channels;
+    let total = info.frames.max(1) as f32;
+    let rate = info.rate;
+    let format = if info.mp3 {
+        RecFormat::Mp3
+    } else if info.float {
+        RecFormat::Wav32f
+    } else {
+        RecFormat::Wav24
+    };
 
     // Pass 1: measure.
-    let mut meter = EbuR128::new(ch as u32, spec.sample_rate, Mode::I).map_err(|e| format!("Loudness meter: {e}"))?;
+    let mut meter = EbuR128::new(ch as u32, rate, Mode::I).map_err(|e| format!("Loudness meter: {e}"))?;
     let mut buf = Vec::new();
     let mut done = 0f32;
     while frames.next_chunk(&mut buf) {
@@ -271,27 +365,21 @@ pub fn level_wav(
     let gain = 10f32.powf(gain_db as f32 / 20.0);
 
     // Pass 2: apply gain and limiter, measure the result as it is written.
-    let (mut frames, _, _) = WavFrames::open(input)?;
-    let out_spec = hound::WavSpec { channels: ch as u16, sample_rate: spec.sample_rate, bits_per_sample: 24, sample_format: hound::SampleFormat::Int };
-    let temp = output.with_extension("wav.part");
-    let mut writer = hound::WavWriter::create(&temp, out_spec).map_err(|e| format!("Could not create {}: {e}", output.display()))?;
-    let mut check = EbuR128::new(ch as u32, spec.sample_rate, Mode::I).map_err(|e| format!("Loudness meter: {e}"))?;
+    let (mut frames, _) = open_source(input)?;
+    let temp = PathBuf::from(format!("{}.part", output.display()));
+    let mut writer = Sink::create(format, &temp, rate, ch)?;
+    let mut check = EbuR128::new(ch as u32, rate, Mode::I).map_err(|e| format!("Loudness meter: {e}"))?;
     let mut tp = TruePeak::new(ch);
     let (safety_db, safety_knee) = if smooth { (SMOOTH_SAFETY_DB, 0.0) } else { (SAMPLE_CEILING_DB, 0.0) };
-    let mut limiter = Limiter::new(ch, spec.sample_rate, safety_db, safety_knee, LOOKAHEAD_SECS, RELEASE_SECS);
-    let mut smoother = smooth.then(|| Limiter::new(ch, spec.sample_rate, SMOOTH_THRESHOLD_DB, SMOOTH_KNEE_DB, SMOOTH_LOOKAHEAD_SECS, SMOOTH_RELEASE_SECS));
+    let mut limiter = Limiter::new(ch, rate, safety_db, safety_knee, LOOKAHEAD_SECS, RELEASE_SECS);
+    let mut smoother = smooth.then(|| Limiter::new(ch, rate, SMOOTH_THRESHOLD_DB, SMOOTH_KNEE_DB, SMOOTH_LOOKAHEAD_SECS, SMOOTH_RELEASE_SECS));
     let makeup = 10f32.powf((SMOOTH_OUTPUT_DB - SMOOTH_THRESHOLD_DB) as f32 / 20.0);
     let mut stage: Vec<f32> = Vec::new();
     let mut out: Vec<f32> = Vec::new();
-    let mut write = |samples: &[f32], writer: &mut hound::WavWriter<_>, check: &mut EbuR128| -> Result<(), String> {
+    let mut write = |samples: &[f32], writer: &mut Sink, check: &mut EbuR128| -> Result<(), String> {
         tp.add(samples);
         check.add_frames_f32(samples).map_err(|e| format!("Loudness meter: {e}"))?;
-        for s in samples {
-            writer
-                .write_sample((s * 8_388_607.0).round().clamp(-8_388_608.0, 8_388_607.0) as i32)
-                .map_err(|e| format!("Writing {} failed: {e}", output.display()))?;
-        }
-        Ok(())
+        writer.write(samples).map(|_| ())
     };
     let mut done = 0f32;
     while frames.next_chunk(&mut buf) {
@@ -325,7 +413,7 @@ pub fn level_wav(
     }
     limiter.finish(&mut out);
     write(&out, &mut writer, &mut check)?;
-    writer.finalize().map_err(|e| format!("Finishing {} failed: {e}", output.display()))?;
+    writer.finish()?;
     std::fs::rename(&temp, output).map_err(|e| format!("Could not save {}: {e}", output.display()))?;
 
     let final_lufs = check.loudness_global().unwrap_or(f64::NEG_INFINITY);
@@ -343,10 +431,11 @@ pub fn level_wav(
     })
 }
 
-/// `Name.wav` -> `Name-leveled.wav` next to it.
+/// `Name.wav` -> `Name-leveled.wav`, `Name.mp3` -> `Name-leveled.mp3`, next to it.
 pub fn leveled_path(input: &Path) -> PathBuf {
+    let mp3 = input.extension().is_some_and(|e| e.eq_ignore_ascii_case("mp3"));
     let stem = input.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    input.with_file_name(format!("{stem}-leveled.wav"))
+    input.with_file_name(format!("{stem}-leveled.{}", if mp3 { "mp3" } else { "wav" }))
 }
 
 #[cfg(test)]
@@ -390,7 +479,7 @@ mod tests {
         let out = leveled_path(&input);
         assert_eq!(out.file_name().unwrap(), "quiet-leveled.wav");
         let mut last = 0.0;
-        let r = level_wav(&input, &out, -16.0, false, &mut |p| {
+        let r = level_file(&input, &out, -16.0, false, &mut |p| {
             assert!(p >= last, "progress never goes backwards");
             last = p;
         })
@@ -414,7 +503,7 @@ mod tests {
         let input = dir.path().join("peaky.wav");
         write_test_wav(&input, 48_000, 2, 12.0, 0.05, true);
         let out = dir.path().join("peaky-out.wav");
-        let r = level_wav(&input, &out, -16.0, false, &mut |_| {}).unwrap();
+        let r = level_file(&input, &out, -16.0, false, &mut |_| {}).unwrap();
         assert!(r.limited, "the spikes need limiting");
         assert!(r.true_peak_db <= TRUE_PEAK_CEILING_DB + 0.05, "true peak {} dB", r.true_peak_db);
         // measure again from the written file, independently of the leveler's own numbers
@@ -439,8 +528,8 @@ mod tests {
         write_test_wav(&input, 48_000, 2, 12.0, 0.05, true);
         let plain = dir.path().join("plain.wav");
         let smooth = dir.path().join("smooth.wav");
-        let a = level_wav(&input, &plain, -16.0, false, &mut |_| {}).unwrap();
-        let b = level_wav(&input, &smooth, -16.0, true, &mut |_| {}).unwrap();
+        let a = level_file(&input, &plain, -16.0, false, &mut |_| {}).unwrap();
+        let b = level_file(&input, &smooth, -16.0, true, &mut |_| {}).unwrap();
         assert!(b.smoothed && !a.smoothed);
         assert!(crest_db(&smooth) + 2.0 < crest_db(&plain), "crest {} vs {}", crest_db(&smooth), crest_db(&plain));
         assert!(b.final_lufs > a.final_lufs + 1.0, "makeup gain makes it louder: {} vs {}", b.final_lufs, a.final_lufs);
@@ -459,12 +548,72 @@ mod tests {
         assert!((db(0.0) - (-6.0)).abs() < 0.01, "full scale comes down to -6: {}", db(0.0));
     }
 
+    /// Integrated loudness of any readable file, measured independently of the leveler.
+    fn measure(path: &Path) -> f64 {
+        let (mut src, info) = open_source(path).unwrap();
+        let mut m = EbuR128::new(info.channels as u32, info.rate, Mode::I).unwrap();
+        let mut buf = Vec::new();
+        while src.next_chunk(&mut buf) {
+            m.add_frames_f32(&buf).unwrap();
+        }
+        m.loudness_global().unwrap()
+    }
+
+    fn speech_like(secs: f32, level: f32) -> Vec<f32> {
+        (0..(48_000.0 * secs) as usize)
+            .flat_map(|i| {
+                let t = i as f32 / 48_000.0;
+                let env = 0.6 + 0.4 * (t * 1.3).sin();
+                let v = level * env * ((t * std::f32::consts::TAU * 220.0).sin() + 0.5 * (t * std::f32::consts::TAU * 1700.0).sin()) / 1.5;
+                [v, v]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn float_wav_in_gives_float_wav_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("f.wav");
+        let mut sink = Sink::create(RecFormat::Wav32f, &input, 48_000, 2).unwrap();
+        sink.write(&speech_like(15.0, 0.03)).unwrap();
+        sink.finish().unwrap();
+        let out = leveled_path(&input);
+        let r = level_file(&input, &out, -16.0, false, &mut |_| {}).unwrap();
+        let spec = hound::WavReader::open(&out).unwrap().spec();
+        assert_eq!((spec.bits_per_sample, spec.sample_format), (32, hound::SampleFormat::Float));
+        assert!((r.final_lufs + 16.0).abs() < 0.3, "final {}", r.final_lufs);
+        assert!((measure(&out) + 16.0).abs() < 0.3, "re-measured {}", measure(&out));
+    }
+
+    #[test]
+    fn mp3_in_gives_leveled_mp3_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("talk.mp3");
+        let mut sink = Sink::create(RecFormat::Mp3, &input, 48_000, 2).unwrap();
+        sink.write(&speech_like(15.0, 0.03)).unwrap();
+        sink.finish().unwrap();
+        let out = leveled_path(&input);
+        assert_eq!(out.file_name().unwrap(), "talk-leveled.mp3");
+        let mut last = 0.0;
+        let r = level_file(&input, &out, -16.0, true, &mut |p| {
+            assert!(p >= last);
+            last = p;
+        })
+        .unwrap();
+        assert_eq!(last, 1.0);
+        assert!(r.measured_lufs < -25.0, "measured {}", r.measured_lufs);
+        let size = std::fs::metadata(&out).unwrap().len();
+        assert!(size > 256_000 / 8 * 12 && size < 256_000 / 8 * 18, "256k file of about 15 s: {size} bytes");
+        assert!(measure(&out) > measure(&input) + 8.0, "leveled copy is much louder: {} vs {}", measure(&out), measure(&input));
+        assert!(!PathBuf::from(format!("{}.part", out.display())).exists(), "temp file is gone");
+    }
+
     #[test]
     fn mono_files_and_loud_files_work_too() {
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("loud.wav");
         write_test_wav(&input, 44_100, 1, 8.0, 0.5, false);
-        let r = level_wav(&input, &dir.path().join("o.wav"), -19.0, false, &mut |_| {}).unwrap();
+        let r = level_file(&input, &dir.path().join("o.wav"), -19.0, false, &mut |_| {}).unwrap();
         assert!(r.gain_db < 0.0, "a loud file is turned down");
         assert!((r.final_lufs + 19.0).abs() < 0.3, "final {}", r.final_lufs);
     }
@@ -474,10 +623,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("silent.wav");
         write_test_wav(&input, 48_000, 2, 3.0, 0.0, false);
-        let err = level_wav(&input, &dir.path().join("o.wav"), -16.0, false, &mut |_| {}).unwrap_err();
+        let err = level_file(&input, &dir.path().join("o.wav"), -16.0, false, &mut |_| {}).unwrap_err();
         assert!(err.contains("silent"), "{err}");
-        assert!(level_wav(&input, &dir.path().join("o.wav"), 5.0, false, &mut |_| {}).is_err());
-        assert!(level_wav(&dir.path().join("missing.wav"), &dir.path().join("o.wav"), -16.0, false, &mut |_| {}).is_err());
+        assert!(level_file(&input, &dir.path().join("o.wav"), 5.0, false, &mut |_| {}).is_err());
+        assert!(level_file(&dir.path().join("missing.wav"), &dir.path().join("o.wav"), -16.0, false, &mut |_| {}).is_err());
     }
 
     #[test]
@@ -488,7 +637,7 @@ mod tests {
         let mut bytes = std::fs::read(&input).unwrap();
         bytes.truncate(bytes.len() - 100_001); // data chunk now ends mid-frame, header still claims more
         std::fs::write(&input, bytes).unwrap();
-        let r = level_wav(&input, &dir.path().join("o.wav"), -16.0, false, &mut |_| {}).unwrap();
+        let r = level_file(&input, &dir.path().join("o.wav"), -16.0, false, &mut |_| {}).unwrap();
         assert!((r.final_lufs + 16.0).abs() < 0.5, "final {}", r.final_lufs);
     }
 }

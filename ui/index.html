@@ -291,6 +291,13 @@
   <p><strong>Recording</strong></p>
   <div class="row2">
     <label>Input <select id="recInput"></select></label>
+    <label>Format
+      <select id="recFormat">
+        <option value="wav24">24-bit WAV (lossless)</option>
+        <option value="wav32f">32-bit float WAV (lossless)</option>
+        <option value="mp3">MP3, 256 kbps (small)</option>
+      </select>
+    </label>
     <button id="refreshInputs" title="Look for newly connected inputs">Refresh</button>
   </div>
   <div class="row2">
@@ -312,7 +319,8 @@
   <p class="small">The original recording is kept; a copy named <code>&hellip;-leveled.wav</code> is made with its
      loudness set to the target. With the limiter on, it ends up louder than the target, as it does when you run
      both steps in Audacity. Peaks always stay below full scale.</p>
-  <p class="small">Recordings are saved as 24-bit WAV, named with the date and time. Use a folder that is not
+  <p class="small">Recordings are named with the date (MM-DD-YYYY). WAV is best for editing (24-bit is about 1 GB per
+     hour, 32-bit float about 1.4 GB); MP3 at 256 kbps is about 115 MB per hour. A leveled copy keeps the same format. Use a folder that is not
      synced by OneDrive. Windows is kept awake while recording.</p>
   <div class="err" id="recErr"></div>
   <hr style="border-color: var(--line)">
@@ -540,6 +548,7 @@ async function loadRecordSettings() {
     if (r.selected && !r.devices.some((d) => d.name === r.selected)) sel.add(new Option(`${r.selected} (not connected)`, r.selected));
     sel.value = r.selected || '';
     $('recDir').value = rs.dir;
+    $('recFormat').value = rs.format || 'wav24';
     const ls = await invoke('get_level_settings');
     $('autoLevel').checked = ls.auto;
     $('levelSmooth').checked = ls.smooth !== false;
@@ -548,6 +557,10 @@ async function loadRecordSettings() {
     preset.value = String(ls.target);
   } catch (e) { $('recErr').textContent = String(e); }
 }
+$('recFormat').addEventListener('change', () =>
+  invoke('set_record_format', { format: $('recFormat').value })
+    .then(() => { $('recErr').textContent = ''; })
+    .catch(async (e) => { $('recErr').textContent = String(e); try { $('recFormat').value = (await invoke('get_record_settings')).format; } catch (e2) { /* keep */ } }));
 $('recInput').addEventListener('change', () =>
   invoke('set_record_device', { name: $('recInput').value || null }).catch((e) => { $('recErr').textContent = String(e); }));
 const saveLevel = () =>
@@ -656,6 +669,7 @@ function paintMeter(side, peak, dt) {
 
 function renderRec(s) {
   recState = s;
+  $('recFormat').disabled = !!s.recording;
   const now = performance.now();
   const dt = Math.min(1, (now - lastRecAt) / 1000);
   lastRecAt = now;
