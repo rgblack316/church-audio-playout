@@ -337,8 +337,8 @@ pub fn level_file(
     let ch = info.channels;
     let total = info.frames.max(1) as f32;
     let rate = info.rate;
-    let format = if info.mp3 {
-        RecFormat::Mp3
+    let mut format = if info.mp3 {
+        RecFormat::Mp3(crate::format::MP3_DEFAULT) // bitrate refined after pass 1
     } else if info.float {
         RecFormat::Wav32f
     } else {
@@ -353,6 +353,13 @@ pub fn level_file(
         meter.add_frames_f32(&buf).map_err(|e| format!("Loudness meter: {e}"))?;
         done += (buf.len() / ch) as f32;
         progress(0.45 * done / total);
+    }
+    if info.mp3 && done > 0.0 {
+        // Keep the original's bitrate: estimate it from file size over decoded duration.
+        if let Ok(md) = std::fs::metadata(input) {
+            let kbps = md.len() as f64 * 8.0 / (done as f64 / rate as f64) / 1000.0;
+            format = RecFormat::Mp3(crate::format::nearest_mp3_rate(kbps));
+        }
     }
     let measured = meter.loudness_global().map_err(|e| format!("Loudness meter: {e}"))?;
     if !measured.is_finite() {
@@ -586,10 +593,25 @@ mod tests {
     }
 
     #[test]
+    fn leveled_mp3_keeps_the_original_bitrate() {
+        let dir = tempfile::tempdir().unwrap();
+        for kbps in [128u16, 192, 320] {
+            let input = dir.path().join(format!("k{kbps}.mp3"));
+            let mut sink = Sink::create(RecFormat::Mp3(kbps), &input, 48_000, 2).unwrap();
+            sink.write(&speech_like(12.0, 0.03)).unwrap();
+            sink.finish().unwrap();
+            let out = leveled_path(&input);
+            level_file(&input, &out, -16.0, false, &mut |_| {}).unwrap();
+            let (a, b) = (std::fs::metadata(&input).unwrap().len() as f64, std::fs::metadata(&out).unwrap().len() as f64);
+            assert!((b / a - 1.0).abs() < 0.15, "{kbps}: input {a} output {b}");
+        }
+    }
+
+    #[test]
     fn mp3_in_gives_leveled_mp3_out() {
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("talk.mp3");
-        let mut sink = Sink::create(RecFormat::Mp3, &input, 48_000, 2).unwrap();
+        let mut sink = Sink::create(RecFormat::Mp3(256), &input, 48_000, 2).unwrap();
         sink.write(&speech_like(15.0, 0.03)).unwrap();
         sink.finish().unwrap();
         let out = leveled_path(&input);

@@ -600,7 +600,7 @@ mod tests {
             tx.send(block).unwrap();
         }
         drop(tx);
-        write_loop(rx, base.clone(), 48_000, &sh, u64::MAX, RecFormat::Mp3).unwrap();
+        write_loop(rx, base.clone(), 48_000, &sh, u64::MAX, RecFormat::Mp3(256)).unwrap();
         let size = std::fs::metadata(&base).unwrap().len();
         let expected = 256_000 / 8 * secs as u64;
         assert!(size > expected * 9 / 10 && size < expected * 11 / 10, "size {size} vs about {expected}");
